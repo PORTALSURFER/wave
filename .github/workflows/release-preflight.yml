@@ -36,14 +36,6 @@ jobs:
       - name: Run release helper tests
         run: PYTHONDONTWRITEBYTECODE=1 python3 tests/release_helper_test.py
 
-      - name: Configure private git dependencies
-        env:
-          RADIANT_REPO_TOKEN: ${{ secrets.RADIANT_REPO_TOKEN }}
-        run: |
-          set -euo pipefail
-          test -n "$RADIANT_REPO_TOKEN"
-          git config --global url."https://x-access-token:${RADIANT_REPO_TOKEN}@github.com/".insteadOf "https://github.com/"
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:

@@ -57,8 +57,8 @@ never accepted as a command-line argument.
 
 `--package-only` is still a production release: it signs, notarizes, staples,
 and verifies notarization on both bundles. The Actions workflow requires the
-Apple signing/notary secrets, `RADIANT_REPO_TOKEN`, and
-`WAVE_RELEASE_UPLOAD_TOKEN` for publish runs.
+Apple signing/notary secrets and `WAVE_RELEASE_UPLOAD_TOKEN` for publish
+runs.
 
 Production artifacts are macOS arm64, hardened-runtime Developer ID signed,
 notarized, stapled, and checked with

@@ -124,15 +124,6 @@ jobs:
         if: steps.gate.outputs.should_release == 'true'
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Configure private git dependencies
-        if: steps.gate.outputs.should_release == 'true'
-        env:
-          RADIANT_REPO_TOKEN: ${{ secrets.RADIANT_REPO_TOKEN }}
-        run: |
-          set -euo pipefail
-          test -n "$RADIANT_REPO_TOKEN"
-          git config --global url."https://x-access-token:${RADIANT_REPO_TOKEN}@github.com/".insteadOf "https://github.com/"
-
       - name: Install Rust
         if: steps.gate.outputs.should_release == 'true'
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
