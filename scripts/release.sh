@@ -66,10 +66,15 @@ if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
   exit 1
 fi
 
-version="$(python3 - <<'PY'
-import pathlib, tomllib
-print(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["package"]["version"])
-PY
+version="$(cargo metadata --locked --no-deps --format-version=1 --manifest-path "${repo_root}/Cargo.toml" \
+  | python3 -c 'import json, pathlib, sys
+manifest_path = pathlib.Path(sys.argv[1]).resolve()
+for package in json.load(sys.stdin)["packages"]:
+    if pathlib.Path(package["manifest_path"]).resolve() == manifest_path:
+        print(package["version"])
+        break
+else:
+    raise SystemExit(f"package manifest not found: {manifest_path}")' "${repo_root}/Cargo.toml"
 )"
 if [[ -n "${requested_version}" && "${requested_version}" != "${version}" ]]; then
   echo "requested version ${requested_version} does not match Cargo.toml ${version}" >&2
