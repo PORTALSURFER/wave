@@ -197,19 +197,20 @@ class ReleaseHelperTests(unittest.TestCase):
         checkout = workflow.index("- name: Checkout exact main source")
         capture = workflow.index("- name: Capture checked-out source SHA")
         gate = workflow.index("- name: Check release source freshness")
-        credentials = workflow.index("- name: Configure private git dependencies")
+        install = workflow.index("- name: Install Rust")
         self.assertLess(checkout, capture)
         self.assertLess(capture, gate)
-        self.assertLess(gate, credentials)
+        self.assertLess(gate, install)
+        self.assertNotIn("RADIANT_REPO_TOKEN", workflow)
         self.assertIn("RELEASES_URL: https://portalsurfer.org/plugins/api/v1/products/wave/releases", workflow)
         self.assertIn("release_helper.should_release", workflow)
         self.assertIn("RELEASE_CHANNEL: ${{ inputs.channel }}", workflow)
-        gate_block = workflow[gate:credentials]
+        gate_block = workflow[gate:install]
         self.assertIn("source_sha, releases_path, output_path, channel = sys.argv[1:]", gate_block)
         self.assertIn("channel=channel", gate_block)
         self.assertNotIn('channel="nightly"', gate_block)
         self.assertIn("if: steps.gate.outputs.should_release == 'true'", workflow)
-        self.assertEqual(workflow.count("if: steps.gate.outputs.should_release == 'true'"), 7)
+        self.assertEqual(workflow.count("if: steps.gate.outputs.should_release == 'true'"), 6)
         self.assertIn("group: wave-release", workflow)
 
     def test_release_preflight_covers_workflow_and_helper_changes(self):
