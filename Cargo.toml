@@ -1,0 +1,27 @@
+[package]
+name = "wave"
+version = "0.1.0"
+edition = "2024"
+publish = false
+resolver = "2"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+radiant = { git = "https://github.com/PORTALSURFER/radiant.git", rev = "8cbcd7ea76f8c6d9408734cb4a8f446f77a02fa4", default-features = false, optional = true }
+toybox = { git = "https://github.com/PORTALSURFER/toybox.git", rev = "4f86012c17429195e66c24a89e20389aadd8e1de", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+
+[features]
+default = ["radiant-gui"]
+radiant-gui = ["dep:radiant", "toybox/radiant-gui"]
+vst3 = ["toybox/radiant-vst3", "radiant-gui"]
+screenshot-test = ["radiant-gui", "dep:image"]
+
+[lints.rust]
+warnings = "deny"
+missing_docs = "deny"
+
+[lints.rustdoc]
+missing_crate_level_docs = "deny"

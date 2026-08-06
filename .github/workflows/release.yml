@@ -1,0 +1,176 @@
+name: WAVE release
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Release channel
+        required: true
+        default: stable
+        type: choice
+        options: [stable, rc, nightly]
+      publish:
+        description: Publish after production signing and notarization
+        required: true
+        default: false
+        type: boolean
+      only_if_changed:
+        description: Publish only when this channel has changed since its latest release
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
+concurrency:
+  group: wave-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-latest
+    environment: production
+    steps:
+      - name: Checkout exact main source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Capture checked-out source SHA
+        id: source_sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Check release source freshness
+        id: gate
+        env:
+          ONLY_IF_CHANGED: ${{ inputs.only_if_changed }}
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+          RELEASES_URL: https://portalsurfer.org/plugins/api/v1/products/wave/releases
+          SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          releases_json="${RUNNER_TEMP}/wave-releases.json"
+          curl --fail --silent --show-error --location --max-time 30 "${RELEASES_URL}" > "${releases_json}"
+          PYTHONPATH=scripts python3 - "${SOURCE_SHA}" "${releases_json}" "$GITHUB_OUTPUT" "${RELEASE_CHANNEL}" <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+          import tomllib
+
+          import release_helper
+
+          source_sha, releases_path, output_path, channel = sys.argv[1:]
+          try:
+              document = json.loads(Path(releases_path).read_text(encoding="utf-8"))
+              only_if_changed = os.environ["ONLY_IF_CHANGED"] == "true"
+              latest_source_sha = release_helper.latest_release_source_sha(document, channel=channel) if only_if_changed else None
+              should_release = release_helper.should_release(source_sha=source_sha, document=document, channel=channel, only_if_changed=only_if_changed)
+              package_version = tomllib.loads(Path("Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]
+              release_version = release_helper.next_release_version(package_version, document)
+          except (OSError, json.JSONDecodeError, ValueError) as error:
+              print(f"::error::Could not validate public release history: {error}", file=sys.stderr)
+              raise SystemExit(1)
+          with open(output_path, "a", encoding="utf-8") as output:
+              output.write(f"should_release={str(should_release).lower()}\n")
+              output.write(f"latest_source_sha={latest_source_sha or ''}\n")
+              output.write(f"release_version={release_version}\n")
+          print(f"latest source SHA decision: {'publish' if should_release else 'no-op'}")
+          print(f"selected release version: {release_version}")
+          PY
+
+      - name: Bump package patch version
+        if: steps.gate.outputs.should_release == 'true'
+        env:
+          RELEASE_VERSION: ${{ steps.gate.outputs.release_version }}
+          SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          current_version="$(python3 -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("Cargo.toml").read_text(encoding="utf-8"))["package"]["version"])')"
+          if [[ "${current_version}" == "${RELEASE_VERSION}" ]]; then
+            echo "release version v${RELEASE_VERSION} is already present; resuming a pending release bump"
+            exit 0
+          fi
+          python3 scripts/bump_version.py "${RELEASE_VERSION}"
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore(release): bump WAVE to v${RELEASE_VERSION} [skip ci]"
+          test "$(git merge-base "${SOURCE_SHA}" HEAD)" = "${SOURCE_SHA}"
+          for attempt in 1 2 3; do
+            git fetch origin main --quiet
+            if [[ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]]; then
+              git rebase origin/main
+            fi
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            if [[ "${attempt}" == 3 ]]; then
+              echo "could not publish the release version commit after ${attempt} attempts" >&2
+              exit 1
+            fi
+          done
+
+      - name: Capture release source SHA
+        id: release_source
+        if: steps.gate.outputs.should_release == 'true'
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Configure private git dependencies
+        if: steps.gate.outputs.should_release == 'true'
+        env:
+          RADIANT_REPO_TOKEN: ${{ secrets.RADIANT_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$RADIANT_REPO_TOKEN"
+          git config --global url."https://x-access-token:${RADIANT_REPO_TOKEN}@github.com/".insteadOf "https://github.com/"
+
+      - name: Install Rust
+        if: steps.gate.outputs.should_release == 'true'
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Checkout pinned VST3 SDK
+        if: steps.gate.outputs.should_release == 'true'
+        run: |
+          set -euo pipefail
+          git clone https://github.com/steinbergmedia/vst3sdk.git "$RUNNER_TEMP/vst3sdk"
+          git -C "$RUNNER_TEMP/vst3sdk" fetch --depth 1 origin 58f8da7936800732561402d7936584ca4505de07
+          git -C "$RUNNER_TEMP/vst3sdk" checkout --detach 58f8da7936800732561402d7936584ca4505de07
+          echo "VST3_SDK_DIR=$RUNNER_TEMP/vst3sdk" >> "$GITHUB_ENV"
+
+      - name: Produce and optionally publish WAVE release
+        if: steps.gate.outputs.should_release == 'true'
+        env:
+          PORTALSURFER_RELEASE_TOKEN: ${{ inputs.publish && secrets.WAVE_RELEASE_UPLOAD_TOKEN || '' }}
+          APPLE_DEVELOPER_ID_APPLICATION_CERT_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERT_BASE64 }}
+          APPLE_DEVELOPER_ID_APPLICATION_CERT_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERT_PASSWORD }}
+          APPLE_NOTARY_KEY_BASE64: ${{ secrets.APPLE_NOTARY_KEY_BASE64 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          APPLE_CODESIGN_IDENTITY: ${{ secrets.APPLE_CODESIGN_IDENTITY }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ inputs.publish }}" == true ]]; then
+            bash scripts/release.sh --publish --channel "${{ inputs.channel }}"
+          else
+            bash scripts/release.sh --package-only --channel "${{ inputs.channel }}"
+          fi
+
+      - name: Upload immutable bundle for inspection
+        if: steps.gate.outputs.should_release == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wave-release-${{ inputs.channel }}-${{ steps.release_source.outputs.sha }}
+          path: dist/releases/*
+          if-no-files-found: error
+          retention-days: 3

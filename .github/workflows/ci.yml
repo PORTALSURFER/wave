@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Default checks
+        run: bash scripts/ci.sh
+      - name: Screenshot checks
+        env:
+          TOYBOX_UI_SCREENSHOT: "1"
+        run: bash scripts/ci.sh --screenshots
+      - name: VST3 checks
+        env:
+          VST3_SDK_DIR: ${{ runner.temp }}/vst3sdk
+        run: |
+          git clone https://github.com/steinbergmedia/vst3sdk.git "${VST3_SDK_DIR}"
+          git -C "${VST3_SDK_DIR}" checkout --detach 58f8da7936800732561402d7936584ca4505de07
+          bash scripts/ci.sh --vst3
