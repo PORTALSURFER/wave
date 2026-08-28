@@ -14,11 +14,13 @@ use radiant::runtime::{
     SurfacePaintPlan, UiSurface,
 };
 use radiant::theme::ThemeTokens;
-use radiant::widgets::{Widget, WidgetCommon, WidgetInput, WidgetKey, WidgetOutput, WidgetSizing};
+use radiant::widgets::{
+    PointerButton, Widget, WidgetCommon, WidgetInput, WidgetKey, WidgetOutput, WidgetSizing,
+};
 
 use crate::capture::{
-    ENVELOPE_BINS, SnapshotMode, WaveformPublication, WaveformView, WindowLength, current_phase,
-    grid_x, window_phase,
+    ENVELOPE_BINS, EnvelopePoint, SnapshotMode, WaveformPublication, WaveformView, WindowLength,
+    current_phase, grid_x, window_phase,
 };
 
 /// Preferred logical width of the embedded editor.
@@ -38,18 +40,73 @@ const WINDOW_DROPDOWN_MENU_X: f32 = WINDOW_WIDTH as f32 - WINDOW_DROPDOWN_MENU_W
 struct WaveformWidget {
     common: WidgetCommon,
     view: WaveformView,
+    waveform_offset: f32,
+    command_held: bool,
+    shift_held: bool,
+    active_offset: Option<WaveformOffsetDrag>,
+    chart_hovered: bool,
+    retained_envelope: [EnvelopePoint; ENVELOPE_BINS],
+    retained_waveform_bins: usize,
 }
 
 impl WaveformWidget {
-    fn new(view: WaveformView) -> Self {
+    fn new(
+        view: WaveformView,
+        waveform_offset: f32,
+        command_held: bool,
+        shift_held: bool,
+        active_offset: Option<WaveformOffsetDrag>,
+    ) -> Self {
+        let (retained_waveform_bins, retained_envelope) = waveform_source_for_view(view)
+            .unwrap_or((0, [EnvelopePoint::default(); ENVELOPE_BINS]));
         Self {
             common: WidgetCommon::new(
                 1,
                 WidgetSizing::new(Vector2::new(1.0, 1.0), Vector2::new(720.0, 420.0)),
             )
+            .with_pointer_focus()
             .without_default_chrome(),
             view,
+            waveform_offset: normalize_waveform_offset(waveform_offset),
+            command_held,
+            shift_held,
+            active_offset,
+            chart_hovered: false,
+            retained_envelope,
+            retained_waveform_bins,
         }
+    }
+
+    fn chart_rect(bounds: Rect) -> Rect {
+        let width = bounds.width().max(1.0);
+        let height = bounds.height().max(1.0);
+        let header_height = 34.0_f32.min(height * 0.2);
+        let footer_height = 28.0_f32.min(height * 0.12);
+        Rect::from_xy_size(
+            bounds.min.x + 16.0,
+            bounds.min.y + header_height,
+            (width - 32.0).max(1.0),
+            (height - header_height - footer_height - 16.0).max(1.0),
+        )
+    }
+
+    fn offset_hovered(&self) -> bool {
+        self.chart_hovered && self.command_held && self.shift_held
+    }
+
+    fn pointer_offset(bounds: Rect, position: Point) -> f32 {
+        let chart = Self::chart_rect(bounds);
+        (position.x - chart.min.x) / chart.width().max(1.0)
+    }
+
+    fn waveform_for_paint(&self) -> (usize, [EnvelopePoint; ENVELOPE_BINS]) {
+        let mut envelope = self.retained_envelope;
+        let mut drawn_bins = self.retained_waveform_bins;
+        if let Some((current_bins, current_envelope)) = waveform_source_for_view(self.view) {
+            envelope[..current_bins].copy_from_slice(&current_envelope[..current_bins]);
+            drawn_bins = drawn_bins.max(current_bins);
+        }
+        (drawn_bins, envelope)
     }
 
     fn status_text(&self) -> String {
@@ -151,7 +208,7 @@ impl WaveformWidget {
                 / self.view.target_sample_count.max(1) as f32
                 * 100.0;
             format!(
-                "LIVE · {} · {:.0}% captured · prior envelope stays visible until replaced; preview updates at 60 Hz.",
+                "LIVE · {} · {:.0}% captured.",
                 self.displayed_window().label(),
                 progress.clamp(0.0, 100.0),
             )
@@ -213,8 +270,77 @@ impl Widget for WaveformWidget {
         &mut self.common
     }
 
-    fn handle_input(&mut self, _bounds: Rect, _input: WidgetInput) -> Option<WidgetOutput> {
-        None
+    fn handle_input(&mut self, bounds: Rect, input: WidgetInput) -> Option<WidgetOutput> {
+        let message = match input {
+            WidgetInput::PointerMove { position } => {
+                self.common.state.hovered = bounds.contains(position);
+                self.chart_hovered = Self::chart_rect(bounds).contains(position);
+                self.active_offset
+                    .map(|drag| EditorMessage::DragWaveformOffset {
+                        delta: Self::pointer_offset(bounds, position) - drag.start_pointer_x,
+                    })
+            }
+            WidgetInput::PointerModifiersChanged { modifiers } => {
+                (self.command_held != modifiers.command || self.shift_held != modifiers.shift)
+                    .then_some(EditorMessage::SetWaveformModifiers {
+                        command_held: modifiers.command,
+                        shift_held: modifiers.shift,
+                    })
+            }
+            WidgetInput::PointerPress {
+                position,
+                button: PointerButton::Primary,
+                modifiers,
+            } if Self::chart_rect(bounds).contains(position)
+                && modifiers.command
+                && modifiers.shift =>
+            {
+                self.common.state.hovered = true;
+                self.common.state.pressed = true;
+                self.chart_hovered = true;
+                Some(EditorMessage::BeginWaveformOffset {
+                    pointer_x: Self::pointer_offset(bounds, position),
+                })
+            }
+            WidgetInput::PointerRelease {
+                position,
+                button: PointerButton::Primary,
+                ..
+            }
+            | WidgetInput::PointerDrop {
+                position,
+                button: PointerButton::Primary,
+                ..
+            } => {
+                self.common.state.pressed = false;
+                self.common.state.hovered = bounds.contains(position);
+                self.chart_hovered = Self::chart_rect(bounds).contains(position);
+                self.active_offset
+                    .map(|drag| EditorMessage::EndWaveformOffset {
+                        delta: Self::pointer_offset(bounds, position) - drag.start_pointer_x,
+                    })
+            }
+            WidgetInput::FocusChanged(focused) => {
+                self.common.state.focused = focused;
+                (!focused && self.active_offset.is_some())
+                    .then_some(EditorMessage::CancelWaveformOffset)
+            }
+            _ => None,
+        }?;
+        Some(WidgetOutput::typed(message))
+    }
+
+    fn synchronize_from_previous(&mut self, previous: &dyn Widget) {
+        let Some(previous) = previous.as_any().downcast_ref::<Self>() else {
+            return;
+        };
+        self.common.state = previous.common.state;
+        self.chart_hovered = previous.chart_hovered;
+        let (retained_waveform_bins, retained_envelope) = previous.waveform_for_paint();
+        if retained_waveform_bins > 0 {
+            self.retained_waveform_bins = retained_waveform_bins;
+            self.retained_envelope = retained_envelope;
+        }
     }
 
     fn append_paint(
@@ -227,14 +353,10 @@ impl Widget for WaveformWidget {
         let id = self.common.id;
         let width = bounds.width().max(1.0);
         let height = bounds.height().max(1.0);
-        let header_height = 34.0_f32.min(height * 0.2);
         let footer_height = 28.0_f32.min(height * 0.12);
-        let chart = Rect::from_xy_size(
-            bounds.min.x + 16.0,
-            bounds.min.y + header_height,
-            (width - 32.0).max(1.0),
-            (height - header_height - footer_height - 16.0).max(1.0),
-        );
+        let chart = Self::chart_rect(bounds);
+        let offset_hovered = self.offset_hovered();
+        let offset_active = self.active_offset.is_some();
 
         primitives.push(PaintPrimitive::FillRect(PaintFillRect {
             widget_id: id,
@@ -266,8 +388,14 @@ impl Widget for WaveformWidget {
         primitives.push(PaintPrimitive::StrokeRect(PaintStrokeRect {
             widget_id: id,
             rect: chart,
-            color: theme.border_emphasis,
-            width: 1.0,
+            color: if offset_active {
+                theme.highlight_cyan.blend_toward(theme.text_primary, 0.55)
+            } else if offset_hovered {
+                theme.highlight_cyan
+            } else {
+                theme.border_emphasis
+            },
+            width: if offset_active { 2.0 } else { 1.0 },
         }));
 
         let center_y = chart.min.y + chart.height() * 0.5;
@@ -300,56 +428,19 @@ impl Widget for WaveformWidget {
 
         let show_live = self.showing_live_preview();
         let show_retained = self.showing_retained_preview();
-        let (sample_count, target_sample_count, envelope) = if show_live {
-            (
-                self.view.live_sample_count,
-                self.view.target_sample_count,
-                &self.view.live_envelope,
-            )
-        } else if show_retained {
-            (
-                self.view.display_sample_count,
-                self.view.display_target_sample_count,
-                &self.view.display_envelope,
-            )
-        } else {
-            (
-                self.view.sample_count,
-                self.view.sample_count,
-                &self.view.envelope,
-            )
-        };
-        if sample_count > 0 {
-            let captured_bins = captured_prefix_bins(sample_count, target_sample_count);
-            // Keep the prior complete envelope under the unfilled live suffix.
-            // The live or retained lane still owns the displayed metadata and
-            // grid; this is only the visual continuity buffer while its
-            // envelope is replaced.
-            let preserve_completed_tail = (show_live || show_retained)
-                && self.view.snapshot_revision > 0
-                && self.view.sample_count > 0;
-            let drawn_bins = if preserve_completed_tail {
-                ENVELOPE_BINS
-            } else {
-                captured_bins
-            };
-            let denominator = ENVELOPE_BINS.saturating_sub(1).max(1) as f32;
-            let mut top_contour = Vec::with_capacity(drawn_bins);
-            let mut bottom_contour = Vec::with_capacity(drawn_bins);
+        let (drawn_bins, display_envelope) = self.waveform_for_paint();
+        if drawn_bins > 0 {
+            let mut source_points = Vec::with_capacity(drawn_bins);
             let mut peak_rects = Vec::new();
-            for (index, live_point) in envelope.iter().take(drawn_bins).enumerate() {
-                let point = if preserve_completed_tail && index >= captured_bins {
-                    self.view.envelope[index]
-                } else {
-                    *live_point
-                };
+            for (index, point) in display_envelope.iter().take(drawn_bins).enumerate() {
                 let min = point.min.clamp(-1.0, 1.0);
                 let max = point.max.clamp(-1.0, 1.0);
-                let x = chart.min.x + index as f32 / denominator * chart.width();
+                let source_x = index as f32 / ENVELOPE_BINS.saturating_sub(1).max(1) as f32;
+                let x = chart.min.x
+                    + shifted_waveform_x(source_x, self.waveform_offset) * chart.width();
                 let top = chart.min.y + (1.0 - max) * chart.height() * 0.5;
                 let bottom = chart.min.y + (1.0 - min) * chart.height() * 0.5;
-                top_contour.push(Point::new(x, top));
-                bottom_contour.push(Point::new(x, bottom));
+                source_points.push(*point);
                 if max.abs().max(min.abs()) > 0.85 {
                     peak_rects.push(Rect::from_xy_size(
                         x.clamp(chart.min.x, chart.max.x) - 0.75,
@@ -360,9 +451,6 @@ impl Widget for WaveformWidget {
                 }
             }
 
-            let mut fill_points = Vec::with_capacity(top_contour.len() + bottom_contour.len());
-            fill_points.extend(top_contour.iter().copied());
-            fill_points.extend(bottom_contour.iter().rev().copied());
             let waveform_color = if show_live {
                 theme.highlight_blue
             } else if show_retained {
@@ -370,28 +458,47 @@ impl Widget for WaveformWidget {
             } else {
                 theme.accent_mint
             };
-            primitives.push(PaintPrimitive::FillPolygon(PaintFillPolygon {
-                widget_id: id,
-                points: fill_points.into(),
-                color: waveform_color.with_alpha(if show_live { 32 } else { 64 }),
-            }));
-            primitives.push(PaintPrimitive::StrokePolyline(PaintStrokePolyline {
-                widget_id: id,
-                points: top_contour.into(),
-                color: waveform_color.with_alpha(if show_live { 176 } else { 232 }),
-                width: 1.0,
-            }));
-            primitives.push(PaintPrimitive::StrokePolyline(PaintStrokePolyline {
-                widget_id: id,
-                points: bottom_contour.into(),
-                color: waveform_color.with_alpha(if show_live { 128 } else { 184 }),
-                width: 1.0,
-            }));
+            let waveform_color = if offset_active {
+                theme.highlight_cyan.blend_toward(theme.text_primary, 0.55)
+            } else if offset_hovered {
+                theme.highlight_cyan
+            } else {
+                waveform_color
+            };
+            for segment in shifted_waveform_segments(&source_points, chart, self.waveform_offset) {
+                let mut fill_points = Vec::with_capacity(segment.top.len() + segment.bottom.len());
+                fill_points.extend(segment.top.iter().copied());
+                fill_points.extend(segment.bottom.iter().rev().copied());
+                primitives.push(PaintPrimitive::FillPolygon(PaintFillPolygon {
+                    widget_id: id,
+                    points: fill_points.into(),
+                    color: waveform_color.with_alpha(if show_live { 32 } else { 64 }),
+                }));
+                primitives.push(PaintPrimitive::StrokePolyline(PaintStrokePolyline {
+                    widget_id: id,
+                    points: segment.top.into(),
+                    color: waveform_color.with_alpha(if show_live { 176 } else { 232 }),
+                    width: if offset_active { 1.5 } else { 1.0 },
+                }));
+                primitives.push(PaintPrimitive::StrokePolyline(PaintStrokePolyline {
+                    widget_id: id,
+                    points: segment.bottom.into(),
+                    color: waveform_color.with_alpha(if show_live { 128 } else { 184 }),
+                    width: if offset_active { 1.5 } else { 1.0 },
+                }));
+            }
             if !peak_rects.is_empty() {
                 primitives.push(PaintPrimitive::FillRectBatch(PaintFillRectBatch {
                     widget_id: id,
                     rects: peak_rects.into(),
-                    color: if show_live {
+                    color: if offset_active {
+                        theme
+                            .highlight_cyan
+                            .blend_toward(theme.text_primary, 0.55)
+                            .with_alpha(220)
+                    } else if offset_hovered {
+                        theme.highlight_cyan.with_alpha(220)
+                    } else if show_live {
                         theme.highlight_blue.with_alpha(144)
                     } else {
                         theme.highlight_orange.with_alpha(220)
@@ -445,17 +552,195 @@ fn captured_prefix_bins(sample_count: usize, target_sample_count: usize) -> usiz
         .clamp(1, ENVELOPE_BINS)
 }
 
+fn waveform_source_for_view(view: WaveformView) -> Option<(usize, [EnvelopePoint; ENVELOPE_BINS])> {
+    let show_live = view.is_playing
+        && view.live_valid
+        && view.live_sample_count > 0
+        && view.target_sample_count > 0;
+    let show_retained = !show_live
+        && view.display_valid
+        && view.display_sample_count > 0
+        && view.display_target_sample_count > 0;
+    let (sample_count, target_sample_count, source) = if show_live {
+        (
+            view.live_sample_count,
+            view.target_sample_count,
+            view.live_envelope,
+        )
+    } else if show_retained {
+        (
+            view.display_sample_count,
+            view.display_target_sample_count,
+            view.display_envelope,
+        )
+    } else if view.sample_count > 0 {
+        (view.sample_count, view.sample_count, view.envelope)
+    } else {
+        return None;
+    };
+    let captured_bins = captured_prefix_bins(sample_count, target_sample_count);
+    if captured_bins == 0 {
+        return None;
+    }
+
+    let preserve_completed_tail =
+        (show_live || show_retained) && view.snapshot_revision > 0 && view.sample_count > 0;
+    let drawn_bins = if preserve_completed_tail {
+        ENVELOPE_BINS
+    } else {
+        captured_bins
+    };
+    let mut envelope = if preserve_completed_tail {
+        view.envelope
+    } else {
+        [EnvelopePoint::default(); ENVELOPE_BINS]
+    };
+    envelope[..captured_bins].copy_from_slice(&source[..captured_bins]);
+    Some((drawn_bins, envelope))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WaveformOffsetDrag {
+    origin_offset: f32,
+    start_pointer_x: f32,
+}
+
+#[derive(Default)]
+struct WaveformSegment {
+    top: Vec<Point>,
+    bottom: Vec<Point>,
+}
+
+fn normalize_waveform_offset(offset: f32) -> f32 {
+    if offset.is_finite() {
+        offset.rem_euclid(1.0)
+    } else {
+        0.0
+    }
+}
+
+fn shifted_waveform_x(source_x: f32, offset: f32) -> f32 {
+    let translated_x = source_x + normalize_waveform_offset(offset);
+    if translated_x <= 1.0 {
+        translated_x
+    } else {
+        translated_x.rem_euclid(1.0)
+    }
+}
+
+fn waveform_y_points(point: EnvelopePoint, chart: Rect) -> (f32, f32) {
+    let min = point.min.clamp(-1.0, 1.0);
+    let max = point.max.clamp(-1.0, 1.0);
+    (
+        chart.min.y + (1.0 - max) * chart.height() * 0.5,
+        chart.min.y + (1.0 - min) * chart.height() * 0.5,
+    )
+}
+
+fn shifted_waveform_segments(
+    source: &[EnvelopePoint],
+    chart: Rect,
+    offset: f32,
+) -> Vec<WaveformSegment> {
+    if source.is_empty() {
+        return Vec::new();
+    }
+
+    let denominator = ENVELOPE_BINS.saturating_sub(1).max(1) as f32;
+    let offset = normalize_waveform_offset(offset);
+    let mut segments = vec![WaveformSegment::default()];
+    let mut previous_translated_x = offset;
+    let (previous_top_y, previous_bottom_y) = waveform_y_points(source[0], chart);
+    segments[0].top.push(Point::new(
+        chart.min.x + previous_translated_x * chart.width(),
+        previous_top_y,
+    ));
+    segments[0].bottom.push(Point::new(
+        chart.min.x + previous_translated_x * chart.width(),
+        previous_bottom_y,
+    ));
+
+    for (index, point) in source.iter().enumerate().skip(1) {
+        let source_x = index as f32 / denominator;
+        let translated_x = source_x + offset;
+        let (top_y, bottom_y) = waveform_y_points(*point, chart);
+        if translated_x <= 1.0 {
+            segments.last_mut().unwrap().top.push(Point::new(
+                chart.min.x + translated_x * chart.width(),
+                top_y,
+            ));
+            segments.last_mut().unwrap().bottom.push(Point::new(
+                chart.min.x + translated_x * chart.width(),
+                bottom_y,
+            ));
+        } else if previous_translated_x <= 1.0 {
+            let fraction = ((1.0 - previous_translated_x) / (translated_x - previous_translated_x))
+                .clamp(0.0, 1.0);
+            let seam_top_y = previous_top_y + (top_y - previous_top_y) * fraction;
+            let seam_bottom_y = previous_bottom_y + (bottom_y - previous_bottom_y) * fraction;
+            let current = segments.last_mut().unwrap();
+            current.top.push(Point::new(chart.max.x, seam_top_y));
+            current.bottom.push(Point::new(chart.max.x, seam_bottom_y));
+
+            let wrapped_x = translated_x - 1.0;
+            let mut wrapped = WaveformSegment::default();
+            wrapped.top.push(Point::new(chart.min.x, seam_top_y));
+            wrapped.bottom.push(Point::new(chart.min.x, seam_bottom_y));
+            wrapped
+                .top
+                .push(Point::new(chart.min.x + wrapped_x * chart.width(), top_y));
+            wrapped.bottom.push(Point::new(
+                chart.min.x + wrapped_x * chart.width(),
+                bottom_y,
+            ));
+            segments.push(wrapped);
+        } else {
+            let wrapped_x = translated_x - 1.0;
+            segments
+                .last_mut()
+                .unwrap()
+                .top
+                .push(Point::new(chart.min.x + wrapped_x * chart.width(), top_y));
+            segments.last_mut().unwrap().bottom.push(Point::new(
+                chart.min.x + wrapped_x * chart.width(),
+                bottom_y,
+            ));
+        }
+        previous_translated_x = translated_x;
+    }
+
+    segments
+}
+
 struct EditorState {
     publication: Arc<WaveformPublication>,
     view: WaveformView,
     selected_window: WindowLength,
     window_dropdown_open: bool,
+    waveform_offset: f32,
+    waveform_command_held: bool,
+    waveform_shift_held: bool,
+    active_waveform_offset: Option<WaveformOffsetDrag>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum EditorMessage {
     ToggleWindowDropdown,
     SelectWindow(WindowLength),
+    SetWaveformModifiers {
+        command_held: bool,
+        shift_held: bool,
+    },
+    BeginWaveformOffset {
+        pointer_x: f32,
+    },
+    DragWaveformOffset {
+        delta: f32,
+    },
+    EndWaveformOffset {
+        delta: f32,
+    },
+    CancelWaveformOffset,
 }
 
 type EditorRuntime = DeclarativeSurfaceRuntime<
@@ -484,17 +769,21 @@ fn project_surface(state: &mut EditorState) -> Arc<UiSurface<EditorMessage>> {
             .width(WINDOW_DROPDOWN_WIDTH)
             .height(WINDOW_DROPDOWN_TRIGGER_HEIGHT);
     let header_row = row([
-        text("WAVE  /  BEAT-SYNCED WAVEFORM")
-            .fill_width()
-            .key("wave-header-title"),
-        text("WINDOW").key("window-label"),
+        text("WAVE").fill_width().key("wave-header-title"),
         window_dropdown,
     ])
     .fill_width()
     .height(WINDOW_HEADER_HEIGHT);
     let editor = column([
         header_row.key("wave-header"),
-        custom_widget_direct(WaveformWidget::new(state.view)).fill(),
+        custom_widget_direct(WaveformWidget::new(
+            state.view,
+            state.waveform_offset,
+            state.waveform_command_held,
+            state.waveform_shift_held,
+            state.active_waveform_offset,
+        ))
+        .fill(),
     ])
     .key("wave-editor")
     .fill();
@@ -527,6 +816,39 @@ fn reduce_surface(state: &mut EditorState, message: EditorMessage) {
             state.window_dropdown_open = false;
             state.publication.set_selected_window(window);
         }
+        EditorMessage::SetWaveformModifiers {
+            command_held,
+            shift_held,
+        } => {
+            state.waveform_command_held = command_held;
+            state.waveform_shift_held = shift_held;
+            if state.active_waveform_offset.is_some() {
+                state.active_waveform_offset = None;
+            }
+        }
+        EditorMessage::BeginWaveformOffset { pointer_x } => {
+            state.waveform_command_held = true;
+            state.waveform_shift_held = true;
+            state.active_waveform_offset = Some(WaveformOffsetDrag {
+                origin_offset: state.waveform_offset,
+                start_pointer_x: pointer_x,
+            });
+        }
+        EditorMessage::DragWaveformOffset { delta } => {
+            if let Some(drag) = state.active_waveform_offset {
+                state.waveform_offset = normalize_waveform_offset(drag.origin_offset + delta);
+            }
+        }
+        EditorMessage::EndWaveformOffset { delta } => {
+            if let Some(drag) = state.active_waveform_offset.take() {
+                state.waveform_offset = normalize_waveform_offset(drag.origin_offset + delta);
+            }
+        }
+        EditorMessage::CancelWaveformOffset => {
+            if let Some(drag) = state.active_waveform_offset.take() {
+                state.waveform_offset = normalize_waveform_offset(drag.origin_offset);
+            }
+        }
     }
 }
 
@@ -551,6 +873,10 @@ impl WaveEditor {
                     view: WaveformView::default(),
                     selected_window: WindowLength::DEFAULT,
                     window_dropdown_open: false,
+                    waveform_offset: 0.0,
+                    waveform_command_held: false,
+                    waveform_shift_held: false,
+                    active_waveform_offset: None,
                 },
                 Vector2::new(WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32),
                 project_surface,
@@ -626,6 +952,7 @@ pub const fn preferred_window_size() -> (u32, u32) {
 mod tests {
     use super::*;
     use crate::capture::EnvelopePoint;
+    use radiant::widgets::PointerModifiers;
 
     #[test]
     fn invalid_live_preview_keeps_drawing_the_latest_completed_envelope() {
@@ -642,7 +969,7 @@ mod tests {
             ..WaveformView::default()
         };
 
-        let widget = WaveformWidget::new(view);
+        let widget = WaveformWidget::new(view, 0.0, false, false, None);
         assert!(!widget.showing_live_preview());
         assert_eq!(widget.displayed_window(), WindowLength::FourBeats);
         assert!(widget.status_text().contains("WAITING FOR WINDOW"));
@@ -689,7 +1016,7 @@ mod tests {
             ..WaveformView::default()
         };
 
-        let widget = WaveformWidget::new(view);
+        let widget = WaveformWidget::new(view, 0.0, false, false, None);
         assert!(!widget.showing_live_preview());
         assert!(widget.showing_retained_preview());
         assert_eq!(widget.displayed_window(), WindowLength::TwoBeats);
@@ -747,7 +1074,7 @@ mod tests {
             ..WaveformView::default()
         };
 
-        let widget = WaveformWidget::new(view);
+        let widget = WaveformWidget::new(view, 0.0, false, false, None);
         assert!(!widget.showing_live_preview());
         assert!(widget.showing_retained_preview());
         assert_eq!(widget.displayed_window(), WindowLength::TwoBeats);
@@ -808,7 +1135,7 @@ mod tests {
             is_playing: true,
             ..WaveformView::default()
         };
-        let widget = WaveformWidget::new(view);
+        let widget = WaveformWidget::new(view, 0.0, false, false, None);
         let mut primitives = Vec::new();
         widget.append_paint(
             &mut primitives,
@@ -827,6 +1154,262 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(waveform_lines, vec![ENVELOPE_BINS, ENVELOPE_BINS]);
+    }
+
+    #[test]
+    fn partial_live_repaint_overwrites_new_prefix_and_retains_old_suffix() {
+        let previous_point = EnvelopePoint {
+            min: -0.65,
+            max: 0.55,
+        };
+        let current_point = EnvelopePoint {
+            min: -0.15,
+            max: 0.25,
+        };
+        let previous_view = WaveformView {
+            live_valid: true,
+            live_sample_count: ENVELOPE_BINS / 2,
+            target_sample_count: ENVELOPE_BINS,
+            live_envelope: [previous_point; ENVELOPE_BINS],
+            is_playing: true,
+            ..WaveformView::default()
+        };
+        let current_view = WaveformView {
+            live_valid: true,
+            live_sample_count: 1,
+            target_sample_count: ENVELOPE_BINS,
+            live_envelope: [current_point; ENVELOPE_BINS],
+            is_playing: true,
+            ..WaveformView::default()
+        };
+
+        let previous = WaveformWidget::new(previous_view, 0.0, false, false, None);
+        let mut current = WaveformWidget::new(current_view, 0.0, false, false, None);
+        current.synchronize_from_previous(&previous);
+
+        let (drawn_bins, envelope) = current.waveform_for_paint();
+        assert_eq!(drawn_bins, ENVELOPE_BINS / 2);
+        assert_eq!(envelope[0], current_point);
+        assert_eq!(envelope[1], previous_point);
+        assert_eq!(envelope[ENVELOPE_BINS / 2 - 1], previous_point);
+
+        let mut primitives = Vec::new();
+        current.append_paint(
+            &mut primitives,
+            Rect::from_xy_size(0.0, 0.0, 640.0, 360.0),
+            &LayoutOutput::default(),
+            &ThemeTokens::dark(),
+        );
+        let waveform_lines = primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                PaintPrimitive::StrokePolyline(PaintStrokePolyline { points, .. }) => {
+                    Some(points.len())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(waveform_lines, vec![ENVELOPE_BINS / 2, ENVELOPE_BINS / 2]);
+    }
+
+    #[test]
+    fn command_shift_modifier_gesture_emits_hover_and_begin_messages() {
+        let bounds = Rect::from_xy_size(0.0, 0.0, 640.0, 360.0);
+        let chart = WaveformWidget::chart_rect(bounds);
+        let modifiers = PointerModifiers {
+            command: true,
+            shift: true,
+            ..PointerModifiers::default()
+        };
+        let position = Point::new(
+            chart.min.x + chart.width() * 0.35,
+            chart.min.y + chart.height() * 0.5,
+        );
+
+        let mut widget = WaveformWidget::new(WaveformView::default(), 0.0, false, false, None);
+        let modifier_message = widget
+            .handle_input(bounds, WidgetInput::PointerModifiersChanged { modifiers })
+            .and_then(|output| output.typed_copied::<EditorMessage>());
+        assert_eq!(
+            modifier_message,
+            Some(EditorMessage::SetWaveformModifiers {
+                command_held: true,
+                shift_held: true,
+            })
+        );
+
+        let outside_chart = Point::new(bounds.min.x + 8.0, bounds.min.y + 8.0);
+        assert!(
+            widget
+                .handle_input(
+                    bounds,
+                    WidgetInput::PointerPress {
+                        position: outside_chart,
+                        button: PointerButton::Primary,
+                        modifiers,
+                    },
+                )
+                .is_none()
+        );
+
+        widget.command_held = true;
+        widget.shift_held = true;
+        let hover = widget.handle_input(bounds, WidgetInput::PointerMove { position });
+        assert!(hover.is_none());
+        assert!(widget.offset_hovered());
+
+        let begin = widget
+            .handle_input(
+                bounds,
+                WidgetInput::PointerPress {
+                    position,
+                    button: PointerButton::Primary,
+                    modifiers,
+                },
+            )
+            .and_then(|output| output.typed_copied::<EditorMessage>());
+        assert!(matches!(
+            begin,
+            Some(EditorMessage::BeginWaveformOffset { pointer_x })
+                if (pointer_x - 0.35).abs() < 1.0e-6
+        ));
+        assert!(widget.common.state.pressed);
+    }
+
+    #[test]
+    fn waveform_offset_drag_wraps_and_modifiers_end_the_active_gesture() {
+        let publication = Arc::new(WaveformPublication::new());
+        let mut state = EditorState {
+            publication,
+            view: WaveformView::default(),
+            selected_window: WindowLength::DEFAULT,
+            window_dropdown_open: false,
+            waveform_offset: 0.9,
+            waveform_command_held: false,
+            waveform_shift_held: false,
+            active_waveform_offset: None,
+        };
+
+        reduce_surface(
+            &mut state,
+            EditorMessage::BeginWaveformOffset { pointer_x: 0.2 },
+        );
+        reduce_surface(
+            &mut state,
+            EditorMessage::DragWaveformOffset { delta: 0.25 },
+        );
+        assert!((state.waveform_offset - 0.15).abs() < 1.0e-6);
+        assert!(state.active_waveform_offset.is_some());
+
+        reduce_surface(
+            &mut state,
+            EditorMessage::SetWaveformModifiers {
+                command_held: true,
+                shift_held: false,
+            },
+        );
+        assert!(state.active_waveform_offset.is_none());
+        assert!((state.waveform_offset - 0.15).abs() < 1.0e-6);
+
+        reduce_surface(
+            &mut state,
+            EditorMessage::BeginWaveformOffset { pointer_x: 0.4 },
+        );
+        reduce_surface(
+            &mut state,
+            EditorMessage::DragWaveformOffset { delta: -0.3 },
+        );
+        reduce_surface(&mut state, EditorMessage::CancelWaveformOffset);
+        assert!(state.active_waveform_offset.is_none());
+        assert!((state.waveform_offset - 0.15).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn shifted_waveform_segments_split_at_the_cyclic_seam() {
+        let chart = Rect::from_xy_size(10.0, 20.0, 100.0, 50.0);
+        let source = vec![
+            EnvelopePoint {
+                min: -0.25,
+                max: 0.5,
+            };
+            ENVELOPE_BINS
+        ];
+        let segments = shifted_waveform_segments(&source, chart, 0.25);
+
+        assert_eq!(segments.len(), 2);
+        assert!((segments[0].top[0].x - 35.0).abs() < 1.0e-5);
+        assert_eq!(segments[0].top.last().unwrap().x, chart.max.x);
+        assert_eq!(segments[1].top[0].x, chart.min.x);
+        assert!((segments[1].top.last().unwrap().x - 35.0).abs() < 1.0e-5);
+        for segment in &segments {
+            for point in segment.top.iter().chain(segment.bottom.iter()) {
+                assert!(point.x >= chart.min.x && point.x <= chart.max.x);
+            }
+        }
+        assert_eq!(shifted_waveform_x(1.0, 0.0), 1.0);
+        assert_eq!(shifted_waveform_x(1.0, 0.25), 0.25);
+    }
+
+    #[test]
+    fn modifier_hover_and_active_drag_use_distinct_chart_colors() {
+        let bounds = Rect::from_xy_size(0.0, 0.0, 640.0, 360.0);
+        let theme = ThemeTokens::dark();
+        let view = WaveformView {
+            snapshot_revision: 1,
+            sample_count: ENVELOPE_BINS,
+            envelope: [EnvelopePoint {
+                min: -0.4,
+                max: 0.4,
+            }; ENVELOPE_BINS],
+            ..WaveformView::default()
+        };
+
+        let mut hover_widget = WaveformWidget::new(view, 0.0, true, true, None);
+        hover_widget.chart_hovered = true;
+        let mut hover_primitives = Vec::new();
+        hover_widget.append_paint(
+            &mut hover_primitives,
+            bounds,
+            &LayoutOutput::default(),
+            &theme,
+        );
+        let hover_stroke = hover_primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                PaintPrimitive::StrokeRect(stroke) => Some(stroke),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(hover_stroke.color, theme.highlight_cyan);
+        assert_eq!(hover_stroke.width, 1.0);
+
+        let active_color = theme.highlight_cyan.blend_toward(theme.text_primary, 0.55);
+        let active_widget = WaveformWidget::new(
+            view,
+            0.0,
+            true,
+            true,
+            Some(WaveformOffsetDrag {
+                origin_offset: 0.0,
+                start_pointer_x: 0.25,
+            }),
+        );
+        let mut active_primitives = Vec::new();
+        active_widget.append_paint(
+            &mut active_primitives,
+            bounds,
+            &LayoutOutput::default(),
+            &theme,
+        );
+        let active_stroke = active_primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                PaintPrimitive::StrokeRect(stroke) => Some(stroke),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(active_stroke.color, active_color);
+        assert_eq!(active_stroke.width, 2.0);
     }
 }
 
@@ -953,14 +1536,12 @@ mod screenshot_tests {
             }
         }
         assert_eq!(
-            plan.text_labels()
-                .filter(|label| *label == "WAVE  /  BEAT-SYNCED WAVEFORM")
-                .count(),
+            plan.text_labels().filter(|label| *label == "WAVE").count(),
             1,
             "the editor should expose one title from the outer header"
         );
         let title_rect = plan
-            .first_text_rect("WAVE  /  BEAT-SYNCED WAVEFORM")
+            .first_text_rect("WAVE")
             .expect("outer header title should be painted");
         assert!(title_rect.max.y <= WINDOW_HEADER_HEIGHT);
 
