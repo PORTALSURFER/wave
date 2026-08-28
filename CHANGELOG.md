@@ -69,6 +69,8 @@ All notable changes to this project are documented in this file.
 
 - (changelog) Update changelog [skip ci] (db8cfb9)
 
+- (changelog) Update changelog [skip ci] (50156d7)
+
 
 ### Features
 
@@ -90,6 +92,8 @@ fix: restore Wave nightly release publication (17c5754)
 - Simplify capture status presentation (#4) (d87648d)
 
 - Replace beat-count labels with sync ratios (#5) (457ad92)
+
+- Show waveform offset and add a zero reset gesture (#6) (00ce44b)
 
 
 ### Testing
