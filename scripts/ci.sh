@@ -51,4 +51,10 @@ if [[ "${want_screenshots}" == 1 ]]; then
     || { printf 'open-window dropdown screenshot artifact was not produced\n' >&2; exit 1; }
   [[ -f target/ui-screenshots/wave/multi-beat-live-waveform.png ]] \
     || { printf 'multi-beat live waveform screenshot artifact was not produced\n' >&2; exit 1; }
+  [[ -f target/ui-screenshots/wave/offset-zero.png ]] \
+    || { printf 'zero-offset screenshot artifact was not produced\n' >&2; exit 1; }
+  [[ -f target/ui-screenshots/wave/offset-positive.png ]] \
+    || { printf 'positive-offset screenshot artifact was not produced\n' >&2; exit 1; }
+  [[ -f target/ui-screenshots/wave/offset-negative.png ]] \
+    || { printf 'negative-offset screenshot artifact was not produced\n' >&2; exit 1; }
 fi
