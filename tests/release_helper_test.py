@@ -54,6 +54,8 @@ class ReleaseHelperTests(unittest.TestCase):
         self.assertIn('<key>CFBundleShortVersionString</key><string>${package_version}</string>', release_script)
         self.assertIn('<key>CFBundleVersion</key><string>${package_version}</string>', release_script)
         self.assertIn('build_manifest(publication_version=', release_script)
+        self.assertIn('if [[ -n "${requested_version}" && "${requested_version}" != "${package_version}" ]]', release_script)
+        self.assertIn('publication_version="${requested_publication_version:-${package_version}}"', release_script)
         self.assertIn("wave-default-960x600.png", release_script)
         self.assertIn("wave-v{manifest['version']}-macos.clap.zip", helper)
         self.assertIn("wave-v{manifest['version']}-macos.vst3.zip", helper)
