@@ -206,6 +206,7 @@ impl<'a> PluginAudioProcessor<'a, WaveShared, WaveMainThread<'a>> for WaveAudioP
         shared: &'a WaveShared,
         audio_config: PluginAudioConfiguration,
     ) -> Result<Self, PluginError> {
+        shared.publication.set_sample_rate(audio_config.sample_rate);
         Ok(Self {
             shared,
             capture: CaptureEngine::new(audio_config.sample_rate),

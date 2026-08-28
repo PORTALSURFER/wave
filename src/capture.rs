@@ -25,6 +25,9 @@ const POSITION_TOLERANCE_SAMPLES: f64 = 1.5;
 const LIVE_PREVIEW_HZ: f64 = 60.0;
 const MAX_ENVELOPE_READ_RETRIES: usize = 4;
 
+/// Fallback sample rate used before a host publishes an active rate.
+pub const DEFAULT_SAMPLE_RATE: f64 = 48_000.0;
+
 const WINDOW_ONE_BEAT: u32 = 0;
 const WINDOW_TWO_BEATS: u32 = 1;
 const WINDOW_FOUR_BEATS: u32 = 2;
@@ -363,6 +366,7 @@ pub struct WaveformPublication {
     live_active_valid: AtomicU32,
     live_revision: AtomicU64,
     redraw_revision: AtomicU64,
+    sample_rate_bits: AtomicU64,
     selected_window_raw: AtomicU32,
     transport_sequence: AtomicU64,
     current_tempo_bits: AtomicU32,
@@ -395,6 +399,7 @@ impl WaveformPublication {
             live_active_valid: AtomicU32::new(0),
             live_revision: AtomicU64::new(0),
             redraw_revision: AtomicU64::new(0),
+            sample_rate_bits: AtomicU64::new(DEFAULT_SAMPLE_RATE.to_bits()),
             selected_window_raw: AtomicU32::new(WindowLength::DEFAULT.as_raw()),
             transport_sequence: AtomicU64::new(0),
             current_tempo_bits: AtomicU32::new(0),
@@ -647,6 +652,26 @@ impl WaveformPublication {
     /// Return the latest redraw revision without copying the envelope.
     pub fn redraw_revision(&self) -> u64 {
         self.redraw_revision.load(Ordering::Acquire)
+    }
+
+    /// Return the active instance sample rate used for offset presentation.
+    pub fn sample_rate(&self) -> f64 {
+        f64::from_bits(self.sample_rate_bits.load(Ordering::Acquire))
+    }
+
+    /// Publish a validated active sample rate and request a GUI redraw when it changes.
+    pub fn set_sample_rate(&self, sample_rate: f64) -> bool {
+        if !sample_rate.is_finite() || sample_rate <= 0.0 {
+            return false;
+        }
+        let previous = self
+            .sample_rate_bits
+            .swap(sample_rate.to_bits(), Ordering::AcqRel);
+        if f64::from_bits(previous) == sample_rate {
+            return false;
+        }
+        self.redraw_revision.fetch_add(1, Ordering::Release);
+        true
     }
 }
 
@@ -1415,6 +1440,22 @@ mod tests {
             publication.set_selected_window(window);
             assert_eq!(publication.selected_window(), window);
         }
+    }
+
+    #[test]
+    fn publication_tracks_valid_active_sample_rate_and_redraws_the_gui() {
+        let publication = WaveformPublication::new();
+        assert_eq!(publication.sample_rate(), DEFAULT_SAMPLE_RATE);
+        assert_eq!(publication.redraw_revision(), 0);
+        assert!(!publication.set_sample_rate(48_000.0));
+        assert!(publication.set_sample_rate(44_100.0));
+        assert_eq!(publication.sample_rate(), 44_100.0);
+        assert_eq!(publication.redraw_revision(), 1);
+        assert!(!publication.set_sample_rate(44_100.0));
+        assert!(!publication.set_sample_rate(0.0));
+        assert!(!publication.set_sample_rate(f64::NAN));
+        assert_eq!(publication.sample_rate(), 44_100.0);
+        assert_eq!(publication.redraw_revision(), 1);
     }
 
     #[test]

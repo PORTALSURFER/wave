@@ -261,6 +261,7 @@ impl WaveVst3Processor {
     }
 
     fn publish_runtime(&self, sample_rate: f64) {
+        self.shared.publication.set_sample_rate(sample_rate);
         let Ok(registration) = self.publisher.register() else {
             return;
         };
