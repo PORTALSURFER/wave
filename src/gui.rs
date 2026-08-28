@@ -200,11 +200,12 @@ impl Widget for WaveformWidget {
         let width = bounds.width().max(1.0);
         let height = bounds.height().max(1.0);
         let header_height = 34.0_f32.min(height * 0.2);
+        let footer_height = 28.0_f32.min(height * 0.12);
         let chart = Rect::from_xy_size(
             bounds.min.x + 16.0,
             bounds.min.y + header_height,
             (width - 32.0).max(1.0),
-            (height - header_height - 16.0).max(1.0),
+            (height - header_height - footer_height - 16.0).max(1.0),
         );
 
         primitives.push(PaintPrimitive::FillRect(PaintFillRect {
@@ -1031,6 +1032,33 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn waveform_chart_reserves_original_footer_at_supported_sizes() {
+        let widget = WaveformWidget::new(WaveformView::default());
+
+        for (width, height) in [(640, 360), (WINDOW_WIDTH, WINDOW_HEIGHT), (1600, 1000)] {
+            let bounds = Rect::from_xy_size(0.0, 0.0, width as f32, height as f32);
+            let plan = widget.paint_plan_with_defaults(bounds);
+            let chart = plan
+                .stroke_rects_for_widget(widget.common.id)
+                .next()
+                .map(|stroke| stroke.rect)
+                .unwrap_or_else(|| {
+                    panic!("waveform chart stroke should exist at {width}x{height}")
+                });
+
+            let logical_height = height as f32;
+            let header_height = 34.0_f32.min(logical_height * 0.2);
+            let footer_height = 28.0_f32.min(logical_height * 0.12);
+            let expected_height = (logical_height - header_height - footer_height - 16.0).max(1.0);
+
+            assert!((chart.min.x - 16.0).abs() < 0.001);
+            assert!((chart.min.y - header_height).abs() < 0.001);
+            assert!((chart.width() - (width as f32 - 32.0).max(1.0)).abs() < 0.001);
+            assert!((chart.height() - expected_height).abs() < 0.001);
+        }
     }
 
     fn live_view(window: WindowLength, sample_count: usize, live_revision: u64) -> WaveformView {
