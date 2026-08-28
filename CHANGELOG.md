@@ -67,6 +67,8 @@ All notable changes to this project are documented in this file.
 
 - (changelog) Update changelog [skip ci] (57ed9b1)
 
+- (changelog) Update changelog [skip ci] (db8cfb9)
+
 
 ### Features
 
@@ -86,6 +88,8 @@ feat: rework WAVE header to match Pump product pattern (73cef73)
 fix: restore Wave nightly release publication (17c5754)
 
 - Simplify capture status presentation (#4) (d87648d)
+
+- Replace beat-count labels with sync ratios (#5) (457ad92)
 
 
 ### Testing
