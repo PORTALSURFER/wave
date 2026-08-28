@@ -40,8 +40,9 @@ last valid live slot remains a display-only retained prefix with its capture
 metadata. During live capture and after invalidation, the editor overlays that
 prefix over the tail of the prior completed envelope when one exists; without a
 completed frame, it is shown alone. It remains explicitly non-completed: it
-never advances the completed revision or becomes the current aligned frame. The
-editor reports LIVE, HELD, or INVALIDATED state accordingly.
+never advances the completed revision or becomes the current aligned frame.
+The editor presents concise LIVE, HELD, or WAITING status while the
+retained/non-completed internal state remains unchanged.
 
 ## Validation ladder
 
