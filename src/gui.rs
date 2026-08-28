@@ -1559,6 +1559,16 @@ mod tests {
         let mut editor = WaveEditor::new(Arc::clone(&publication));
         let trigger = widget_rect(&editor, WINDOW_DROPDOWN_WIDGET_ID);
         assert!((trigger.min.x - WINDOW_DROPDOWN_X).abs() < 0.1);
+        let expected_labels = ["1:4", "1:2", "1:1", "2:1"];
+        let closed_plan = editor.paint_plan().clone();
+        assert_eq!(
+            closed_plan
+                .text_runs()
+                .filter(|run| expected_labels.contains(&run.text.as_str()))
+                .map(|run| run.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["1:4"]
+        );
 
         click(&mut editor, center(trigger));
         assert!(editor.runtime.bridge().state().window_dropdown_open);
@@ -1568,6 +1578,21 @@ mod tests {
             Some(WINDOW_DROPDOWN_WIDGET_ID)
         );
         let plan = editor.paint_plan().clone();
+        let mut menu_labels = plan
+            .text_runs()
+            .filter(|run| {
+                run.rect.min.y > trigger.max.y && expected_labels.contains(&run.text.as_str())
+            })
+            .map(|run| (run.rect.min.y, run.text.as_str().to_owned()))
+            .collect::<Vec<_>>();
+        menu_labels.sort_by(|left, right| left.0.total_cmp(&right.0));
+        assert_eq!(
+            menu_labels
+                .iter()
+                .map(|(_, label)| label.as_str())
+                .collect::<Vec<_>>(),
+            expected_labels
+        );
         for window in WindowLength::ALL {
             let option_rects = plan
                 .text_runs()
@@ -1592,7 +1617,15 @@ mod tests {
             editor.runtime.focused_widget(),
             Some(WINDOW_DROPDOWN_WIDGET_ID)
         );
-        assert!(editor.paint_plan().contains_text(selected.label()));
+        let selected_plan = editor.paint_plan().clone();
+        assert_eq!(
+            selected_plan
+                .text_runs()
+                .filter(|run| expected_labels.contains(&run.text.as_str()))
+                .map(|run| run.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["2:1"]
+        );
     }
 
     #[test]

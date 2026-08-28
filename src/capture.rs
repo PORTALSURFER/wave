@@ -68,10 +68,10 @@ impl WindowLength {
     /// Return the exact user-facing label for this window.
     pub const fn label(self) -> &'static str {
         match self {
-            Self::OneBeat => "1 beat",
-            Self::TwoBeats => "2 beats",
-            Self::FourBeats => "4 beats (1 bar in 4/4)",
-            Self::EightBeats => "8 beats (2 bars in 4/4)",
+            Self::OneBeat => "1:4",
+            Self::TwoBeats => "1:2",
+            Self::FourBeats => "1:1",
+            Self::EightBeats => "2:1",
         }
     }
 
@@ -1388,8 +1388,18 @@ mod tests {
         assert_eq!(WindowLength::TwoBeats.beats(), 2);
         assert_eq!(WindowLength::FourBeats.beats(), 4);
         assert_eq!(WindowLength::EightBeats.beats(), 8);
-        assert_eq!(WindowLength::FourBeats.label(), "4 beats (1 bar in 4/4)");
-        assert_eq!(WindowLength::EightBeats.label(), "8 beats (2 bars in 4/4)");
+        let expected_order = [
+            WindowLength::OneBeat,
+            WindowLength::TwoBeats,
+            WindowLength::FourBeats,
+            WindowLength::EightBeats,
+        ];
+        assert_eq!(WindowLength::ALL, expected_order);
+        for (window, expected_label) in expected_order.into_iter().zip(["1:4", "1:2", "1:1", "2:1"])
+        {
+            assert_eq!(window.label(), expected_label);
+            assert_eq!(WindowLength::from_raw(window.as_raw()), window);
+        }
         assert_eq!(WindowLength::from_raw(u32::MAX), WindowLength::OneBeat);
 
         let publication = WaveformPublication::new();
@@ -1401,6 +1411,10 @@ mod tests {
         assert_eq!(publication.redraw_revision(), 1);
         assert!(!publication.set_selected_window(WindowLength::FourBeats));
         assert_eq!(publication.redraw_revision(), 1);
+        for window in WindowLength::ALL {
+            publication.set_selected_window(window);
+            assert_eq!(publication.selected_window(), window);
+        }
     }
 
     #[test]

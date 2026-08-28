@@ -2,9 +2,10 @@
 //!
 //! The audio callback captures only complete selected beat windows when the host
 //! provides a usable tempo, musical position, and playing state. The editor
-//! offers `1 beat` (default), `2 beats`, `4 beats (1 bar in 4/4)`, and `8 beats
-//! (2 bars in 4/4)` per instance; these labels are explicit 4/4 descriptions,
-//! not time-signature decoding or parameters. The retained Radiant editor
+//! offers `1:4` (1 beat, default), `1:2` (2 beats), `1:1` (4 beats, 1 bar in
+//! 4/4), and `2:1` (8 beats, 2 bars in 4/4) per instance; these labels are
+//! explicit 4/4 descriptions, not time-signature decoding or parameters. The
+//! retained Radiant editor
 //! consumes bounded min/max envelopes published through atomic slots; it never
 //! owns or mutates audio-side capture state.
 
