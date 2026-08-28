@@ -75,10 +75,10 @@ exports, and manifest hashes before the staged upload is atomically committed.
 ## V1 behavior
 
 - One stereo input and output, exact f32 pass-through, zero latency and tail.
-- A native per-instance window selector offers exactly `1 beat` (default),
-  `2 beats`, `4 beats (1 bar in 4/4)`, and `8 beats (2 bars in 4/4)`. Synced
-  windows align to integer multiples of the selected beat count from project
-  beat zero.
+- A native per-instance window selector offers exactly `1:4` (1 beat, default),
+  `1:2` (2 beats), `1:1` (4 beats, 1 bar in 4/4), and `2:1` (8 beats, 2 bars
+  in 4/4). Synced windows align to integer multiples of the selected beat
+  count from project beat zero.
 - Each selected window is shown as a 1,024-column peak-preserving min/max
   envelope so narrow kicks stay visible at detail.
 - While playing, a separate live preview progressively overwrites the captured

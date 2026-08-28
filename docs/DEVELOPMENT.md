@@ -15,9 +15,9 @@ release. The VST3 process path validates bus shape, channel pointers,
 range overflow, and aliasing before touching host memory.
 
 Selectable synced lengths are one, two, four, or eight quarter-note beats,
-with explicit labels `4 beats (1 bar in 4/4)` and `8 beats (2 bars in 4/4)`.
-The logical capacity covers the largest supported case: 8 beats at 20 BPM and
-192 kHz is 4,608,000 samples.
+with selector labels `1:4`, `1:2`, `1:1`, and `2:1`, respectively. The latter
+two are one bar and two bars in 4/4. The logical capacity covers the largest
+supported case: 8 beats at 20 BPM and 192 kHz is 4,608,000 samples.
 
 Exact per-channel in-place aliases are accepted. Cross-channel overlap and
 partial overlap are rejected. When a writable stereo output is structurally

@@ -9,9 +9,9 @@ other transient material without changing the audio being monitored.
 
 - CLAP and macOS VST3 expose one stereo effect bus and exact f32 pass-through.
 - A valid host tempo plus musical position produces only completed snapshots
-  for the selected `1 beat`, `2 beats`, `4 beats (1 bar in 4/4)`, or `8 beats
-  (2 bars in 4/4)` window, aligned to integer multiples of that beat count from
-  project beat zero.
+  for the selected `1:4` (1 beat), `1:2` (2 beats), `1:1` (4 beats, 1 bar in
+  4/4), or `2:1` (8 beats, 2 bars in 4/4) window, aligned to integer multiples
+  of that beat count from project beat zero.
 - During playback, a separate bounded live preview may show the captured prefix
   before that completed snapshot is published; its uncaptured suffix retains the
   prior visible envelope while the new data is progressively written. Clearing
@@ -35,8 +35,8 @@ other transient material without changing the audio being monitored.
 
 V1 does not include DSP, spectrum analysis, sidechain input, MIDI, export,
 persistent presets, parameter automation, zoom, freeze, time-signature
-decoding, or multi-beat history. The four labels above are explicit 4/4
-descriptions, not host time-signature decoding.
+decoding, or multi-beat history. The four selector ratios above are explicit
+4/4 descriptions, not host time-signature decoding.
 
 ## Ownership boundaries
 
