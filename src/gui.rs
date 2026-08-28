@@ -1546,6 +1546,113 @@ mod tests {
             Some(WINDOW_HELP_BUTTON_WIDGET_ID)
         );
     }
+
+    #[test]
+    fn transient_overlays_fit_every_supported_viewport_after_real_interactions() {
+        let menu_height = radiant::application::dropdown_menu_height(WindowLength::ALL.len());
+        let menu_top =
+            (WINDOW_DROPDOWN_TRIGGER_Y + WINDOW_DROPDOWN_TRIGGER_HEIGHT + WINDOW_DROPDOWN_GAP)
+                .floor();
+
+        for (width, height) in [(640, 360), (WINDOW_WIDTH, WINDOW_HEIGHT), (1600, 1000)] {
+            let mut editor = test_editor();
+            editor.resize(width, height);
+
+            let trigger = widget_rect(&editor, WINDOW_DROPDOWN_WIDGET_ID);
+            click(&mut editor, center(trigger));
+            assert!(editor.runtime.bridge().state().window_dropdown_open);
+            assert!(!editor.runtime.bridge().state().help_open);
+
+            let dropdown_plan = editor.paint_plan().clone();
+            for window in WindowLength::ALL {
+                let option = dropdown_plan
+                    .text_runs()
+                    .find(|run| {
+                        run.text.as_str() == window.label() && run.rect.min.y > trigger.max.y
+                    })
+                    .map(|run| run.rect)
+                    .unwrap_or_else(|| panic!("missing {window:?} option at {width}x{height}"));
+                assert_inside(option, width, height);
+            }
+
+            let menu_layout = editor
+                .runtime
+                .layout()
+                .rects
+                .values()
+                .find(|rect| {
+                    (rect.min.x - WINDOW_DROPDOWN_X).abs() < 0.1
+                        && (rect.min.y - menu_top).abs() < 0.1
+                        && (rect.width() - WINDOW_DROPDOWN_MENU_WIDTH).abs() < 0.1
+                        && (rect.height() - menu_height).abs() < 0.1
+                })
+                .copied()
+                .unwrap_or_else(|| {
+                    panic!("dropdown layout should be anchored at {width}x{height}")
+                });
+            assert_inside(menu_layout, width, height);
+            for (index, rect) in editor.runtime.layout().rects.values().enumerate() {
+                assert_inside(*rect, width, height);
+                assert!(
+                    rect.max.x <= width as f32 && rect.max.y <= height as f32,
+                    "layout rectangle {index} clips at {width}x{height}: {rect:?}"
+                );
+            }
+            for (index, rect) in dropdown_plan.paint_rects().enumerate() {
+                assert_inside(rect, width, height);
+                assert!(
+                    rect.max.x <= width as f32 && rect.max.y <= height as f32,
+                    "dropdown paint rectangle {index} clips at {width}x{height}: {rect:?}"
+                );
+            }
+            assert!(dropdown_plan.paint_rects().any(|rect| {
+                (rect.min.x - WINDOW_DROPDOWN_X).abs() < 0.1
+                    && (rect.min.y - menu_top).abs() < 0.1
+                    && (rect.width() - WINDOW_DROPDOWN_MENU_WIDTH).abs() < 0.1
+                    && (rect.height() - menu_height).abs() < 0.1
+            }));
+
+            assert!(editor.cancel_text_entry());
+            let help = widget_rect(&editor, WINDOW_HELP_BUTTON_WIDGET_ID);
+            click(&mut editor, center(help));
+            assert!(editor.runtime.bridge().state().help_open);
+            assert!(!editor.runtime.bridge().state().window_dropdown_open);
+
+            let help_plan = editor.paint_plan().clone();
+            assert!(help_plan.contains_text("WAVE HELP"));
+            let panel_layout = editor
+                .runtime
+                .layout()
+                .rects
+                .values()
+                .find(|rect| {
+                    (rect.width() - WINDOW_HELP_WIDTH).abs() < 0.1
+                        && (rect.height() - WINDOW_HELP_HEIGHT).abs() < 0.1
+                })
+                .copied()
+                .unwrap_or_else(|| panic!("help layout should be present at {width}x{height}"));
+            assert_inside(panel_layout, width, height);
+            for (index, rect) in editor.runtime.layout().rects.values().enumerate() {
+                assert_inside(*rect, width, height);
+                assert!(
+                    rect.max.x <= width as f32 && rect.max.y <= height as f32,
+                    "help layout rectangle {index} clips at {width}x{height}: {rect:?}"
+                );
+            }
+            for (index, rect) in help_plan.paint_rects().enumerate() {
+                assert_inside(rect, width, height);
+                assert!(
+                    rect.max.x <= width as f32 && rect.max.y <= height as f32,
+                    "help paint rectangle {index} clips at {width}x{height}: {rect:?}"
+                );
+            }
+            assert!(help_plan.paint_rects().any(|rect| {
+                (rect.width() - WINDOW_HELP_WIDTH).abs() < 0.1
+                    && (rect.height() - WINDOW_HELP_HEIGHT).abs() < 0.1
+            }));
+            assert!(editor.cancel_text_entry());
+        }
+    }
 }
 
 #[cfg(all(test, feature = "screenshot-test"))]
