@@ -131,9 +131,8 @@ impl WaveformWidget {
     fn status_presentation(&self) -> StatusPresentation {
         if self.showing_live_preview() {
             StatusPresentation::Live(self.view.live_window)
-        } else if !self.view.is_playing
-            && (self.showing_retained_preview()
-                || (self.view.snapshot_revision > 0 && self.view.sample_count > 0))
+        } else if self.showing_retained_preview()
+            || (self.view.snapshot_revision > 0 && self.view.sample_count > 0)
         {
             StatusPresentation::Held(self.displayed_window())
         } else {
@@ -1057,7 +1056,7 @@ mod tests {
             display_window: WindowLength::TwoBeats,
             display_sample_count: 1,
             display_target_sample_count: 1024,
-            is_playing: false,
+            is_playing: true,
             ..WaveformView::default()
         });
         assert_eq!(held_retained.status_text(), "HELD · 2 beats");
@@ -1066,7 +1065,7 @@ mod tests {
             snapshot_revision: 1,
             snapshot_window: WindowLength::EightBeats,
             sample_count: 1024,
-            is_playing: false,
+            is_playing: true,
             ..WaveformView::default()
         });
         assert_eq!(held_completed.status_text(), "HELD · 8 beats");
@@ -1083,14 +1082,14 @@ mod tests {
             is_playing: true,
             ..WaveformView::default()
         });
-        assert_eq!(waiting_for_new_capture.status_text(), "WAITING");
+        assert_eq!(waiting_for_new_capture.status_text(), "HELD · 2 beats");
 
         for (widget, expected) in [
             (&live, "LIVE · 4 beats"),
             (&held_retained, "HELD · 2 beats"),
             (&held_completed, "HELD · 8 beats"),
             (&waiting, "WAITING"),
-            (&waiting_for_new_capture, "WAITING"),
+            (&waiting_for_new_capture, "HELD · 2 beats"),
         ] {
             assert_eq!(painted_texts(widget), vec![expected.to_owned()]);
         }
@@ -1135,41 +1134,63 @@ mod tests {
             expected_revision
         );
 
-        let waiting_snapshot = WaveformWidget::new(WaveformView {
+        let held_stopped = WaveformWidget::new(WaveformView {
+            snapshot_revision: 1,
+            snapshot_window: WindowLength::FourBeats,
+            sample_count: 1,
+            is_playing: false,
+            ..WaveformView::default()
+        });
+        let held_playing = WaveformWidget::new(WaveformView {
+            snapshot_revision: 1,
+            snapshot_window: WindowLength::FourBeats,
+            sample_count: 1,
+            is_playing: true,
+            ..WaveformView::default()
+        });
+        assert_eq!(held_stopped.status_text(), "HELD · 4 beats");
+        assert_eq!(held_playing.status_text(), "HELD · 4 beats");
+        assert_eq!(
+            held_stopped.automation_value_text().as_deref(),
+            Some("HELD · 4 beats")
+        );
+        assert_eq!(
+            held_playing.automation_value_text().as_deref(),
+            Some("HELD · 4 beats")
+        );
+        assert_eq!(
+            held_stopped.capabilities().semantics_revision(),
+            held_playing.capabilities().semantics_revision()
+        );
+
+        let empty_snapshot = WaveformWidget::new(WaveformView {
             snapshot_window: WindowLength::OneBeat,
-            display_valid: true,
             display_window: WindowLength::TwoBeats,
-            display_sample_count: 1,
-            display_target_sample_count: 1024,
-            is_playing: true,
             ..WaveformView::default()
         });
-        let waiting_display = WaveformWidget::new(WaveformView {
+        let empty_display = WaveformWidget::new(WaveformView {
             snapshot_window: WindowLength::EightBeats,
-            display_valid: true,
             display_window: WindowLength::FourBeats,
-            display_sample_count: 1,
-            display_target_sample_count: 1024,
             is_playing: true,
             ..WaveformView::default()
         });
-        assert_eq!(waiting_snapshot.status_text(), "WAITING");
-        assert_eq!(waiting_display.status_text(), "WAITING");
+        assert_eq!(empty_snapshot.status_text(), "WAITING");
+        assert_eq!(empty_display.status_text(), "WAITING");
         assert_eq!(
-            waiting_snapshot.automation_value_text().as_deref(),
+            empty_snapshot.automation_value_text().as_deref(),
             Some("WAITING")
         );
         assert_eq!(
-            waiting_display.automation_value_text().as_deref(),
+            empty_display.automation_value_text().as_deref(),
             Some("WAITING")
         );
         assert_eq!(
-            waiting_snapshot.capabilities().semantics_revision(),
+            empty_snapshot.capabilities().semantics_revision(),
             Some(WidgetSemanticsRevision::exact(StatusPresentation::Waiting))
         );
         assert_eq!(
-            waiting_snapshot.capabilities().semantics_revision(),
-            waiting_display.capabilities().semantics_revision()
+            empty_snapshot.capabilities().semantics_revision(),
+            empty_display.capabilities().semantics_revision()
         );
     }
 
@@ -1191,7 +1212,7 @@ mod tests {
         let widget = WaveformWidget::new(view);
         assert!(!widget.showing_live_preview());
         assert_eq!(widget.displayed_window(), WindowLength::FourBeats);
-        assert_eq!(widget.status_text(), "WAITING");
+        assert_eq!(widget.status_text(), "HELD · 4 beats");
 
         let mut primitives = Vec::new();
         widget.append_paint(
@@ -1233,7 +1254,7 @@ mod tests {
         assert!(!widget.showing_live_preview());
         assert!(widget.showing_retained_preview());
         assert_eq!(widget.displayed_window(), WindowLength::TwoBeats);
-        assert_eq!(widget.status_text(), "WAITING");
+        assert_eq!(widget.status_text(), "HELD · 2 beats");
 
         let mut primitives = Vec::new();
         widget.append_paint(
@@ -1281,7 +1302,7 @@ mod tests {
             display_sample_count: ENVELOPE_BINS / 2,
             display_target_sample_count: ENVELOPE_BINS,
             display_envelope: [prefix; ENVELOPE_BINS],
-            is_playing: false,
+            is_playing: true,
             ..WaveformView::default()
         };
 
@@ -1822,7 +1843,7 @@ mod screenshot_tests {
         publication.update_transport(crate::capture::TransportInfo {
             tempo_bpm: Some(128.0),
             song_pos_beats: Some(4.35),
-            is_playing: false,
+            is_playing: true,
         });
         let mut editor = WaveEditor::new(publication);
         let plan = editor.paint_plan().clone();
