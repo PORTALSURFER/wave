@@ -5,16 +5,23 @@ use std::sync::Arc;
 use radiant::application::{
     DropdownOption, IntoView, dropdown_menu_overlay_below, dropdown_trigger,
 };
-use radiant::gui::types::{Point, Rect, Vector2};
-use radiant::layout::LayoutOutput;
-use radiant::prelude::{column, custom_widget_direct, row, stack, text};
+use radiant::gui::automation::AutomationRole;
+use radiant::gui::types::{Point, Rect, Rgba8, Vector2};
+use radiant::layout::{CrossAlign, LayoutOutput, MainAlign};
+use radiant::prelude::{
+    TextAlign, TextColorRole, ViewNode, column, custom_widget_direct, custom_widget_mapped,
+    pointer_shield, row, spacer, stack, text,
+};
 use radiant::runtime::{
     DeclarativeSurfaceRuntime, Event, PaintFillPolygon, PaintFillRect, PaintFillRectBatch,
     PaintPrimitive, PaintStrokePolyline, PaintStrokeRect, PaintText, PaintTextAlign, PaintTextRun,
     SurfacePaintPlan, UiSurface,
 };
 use radiant::theme::ThemeTokens;
-use radiant::widgets::{Widget, WidgetCommon, WidgetInput, WidgetKey, WidgetOutput, WidgetSizing};
+use radiant::widgets::{
+    ButtonMessage, ButtonWidget, PointerShieldMessage, Widget, WidgetCapabilities, WidgetCommon,
+    WidgetInput, WidgetKey, WidgetOutput, WidgetSemantics, WidgetSizing,
+};
 
 use crate::capture::{
     ENVELOPE_BINS, SnapshotMode, WaveformPublication, WaveformView, WindowLength, current_phase,
@@ -27,12 +34,38 @@ pub const WINDOW_WIDTH: u32 = 960;
 pub const WINDOW_HEIGHT: u32 = 600;
 
 const WINDOW_DROPDOWN_WIDTH: f32 = 236.0;
-const WINDOW_HEADER_HEIGHT: f32 = 32.0;
-const WINDOW_DROPDOWN_TRIGGER_Y: f32 = 4.0;
+const WINDOW_HEADER_HEIGHT: f32 = 45.9;
+const WINDOW_HEADER_CONTROL_HEIGHT: f32 = 34.0;
 const WINDOW_DROPDOWN_TRIGGER_HEIGHT: f32 = 24.0;
+const WINDOW_DROPDOWN_TRIGGER_Y: f32 = (WINDOW_HEADER_HEIGHT - WINDOW_HEADER_CONTROL_HEIGHT) * 0.5
+    + (WINDOW_HEADER_CONTROL_HEIGHT - WINDOW_DROPDOWN_TRIGGER_HEIGHT) * 0.5;
 const WINDOW_DROPDOWN_GAP: f32 = 4.0;
 const WINDOW_DROPDOWN_MENU_WIDTH: f32 = 260.0;
-const WINDOW_DROPDOWN_MENU_X: f32 = WINDOW_WIDTH as f32 - WINDOW_DROPDOWN_MENU_WIDTH - 16.0;
+const WINDOW_HEADER_LABEL_WIDTH: f32 = 52.0;
+const WINDOW_HEADER_CONTROL_GAP: f32 = 4.0;
+const WINDOW_DROPDOWN_X: f32 = WINDOW_HEADER_LABEL_WIDTH + WINDOW_HEADER_CONTROL_GAP;
+const WINDOW_HEADER_BRAND_WIDTH: f32 = 153.0;
+const WINDOW_HEADER_BRAND_WORDMARK_WIDTH: f32 = 98.0;
+const WINDOW_HEADER_BRAND_TITLE_HEIGHT: f32 = 27.2;
+const WINDOW_HEADER_BRAND_META_HEIGHT: f32 = 13.6;
+const WINDOW_HEADER_BRAND_HEIGHT: f32 = WINDOW_HEADER_HEIGHT;
+const WINDOW_HELP_BUTTON_SIZE: f32 = 28.0;
+const WINDOW_HELP_WIDTH: f32 = 306.0;
+const WINDOW_HELP_HEIGHT: f32 = 160.0;
+const WINDOW_HELP_RIGHT_INSET: f32 = 16.0;
+const WINDOW_HEADER_BUTTON_TEXT_TOP_INSET: f32 = 3.4;
+const WINDOW_HEADER_BUTTON_FONT_SIZE: f32 = 12.0;
+const WINDOW_DROPDOWN_WIDGET_ID: u64 = 0x5741_5645_0000_0001;
+const WINDOW_HELP_BUTTON_WIDGET_ID: u64 = 0x5741_5645_0000_0002;
+const WINDOW_VERSION_LABEL: &str = env!("CARGO_PKG_VERSION");
+
+const WINDOW_HELP_ROWS: [(&str, &str); 5] = [
+    ("Tab / Shift + Tab", "Move focus"),
+    ("Enter / Space", "Activate the focused control"),
+    ("WINDOW menu", "Select a beat window"),
+    ("Escape", "Dismiss the open menu or help"),
+    ("Click outside", "Dismiss the open menu or help"),
+];
 
 #[derive(Clone)]
 struct WaveformWidget {
@@ -445,17 +478,261 @@ fn captured_prefix_bins(sample_count: usize, target_sample_count: usize) -> usiz
         .clamp(1, ENVELOPE_BINS)
 }
 
+fn header_button_hover_fill(theme: &ThemeTokens) -> Rgba8 {
+    theme
+        .surface_base
+        .blend_toward(theme.surface_overlay, theme.state_hover_strong)
+}
+
+fn header_button_text_rect(bounds: Rect) -> Rect {
+    Rect::from_xy_size(
+        bounds.min.x,
+        bounds.min.y + WINDOW_HEADER_BUTTON_TEXT_TOP_INSET,
+        bounds.width(),
+        (bounds.height() - WINDOW_HEADER_BUTTON_TEXT_TOP_INSET).max(1.0),
+    )
+}
+
+fn header_button_text_baseline(rect: Rect) -> f32 {
+    (rect.height() * 0.5 + WINDOW_HEADER_BUTTON_FONT_SIZE * 0.35).max(0.0)
+}
+
+/// Compact question-mark control that opens the Wave help panel.
+#[derive(Clone, Debug)]
+struct WaveHelpButtonWidget {
+    button: ButtonWidget,
+}
+
+impl WaveHelpButtonWidget {
+    fn new() -> Self {
+        Self {
+            button: ButtonWidget::new(
+                0,
+                "?",
+                WidgetSizing::fixed(Vector2::new(
+                    WINDOW_HELP_BUTTON_SIZE,
+                    WINDOW_HELP_BUTTON_SIZE,
+                )),
+            )
+            .with_hover_chrome_only(),
+        }
+    }
+}
+
+impl Widget for WaveHelpButtonWidget {
+    fn common(&self) -> &WidgetCommon {
+        self.button.common()
+    }
+
+    fn common_mut(&mut self) -> &mut WidgetCommon {
+        self.button.common_mut()
+    }
+
+    fn handle_input(&mut self, bounds: Rect, input: WidgetInput) -> Option<WidgetOutput> {
+        self.button
+            .handle_input(bounds, input)
+            .map(WidgetOutput::typed)
+    }
+
+    fn accepts_pointer_move(&self) -> bool {
+        true
+    }
+
+    fn synchronize_from_previous(&mut self, previous: &dyn Widget) {
+        let Some(previous) = previous.as_any().downcast_ref::<Self>() else {
+            return;
+        };
+        self.button.synchronize_from_previous(&previous.button);
+    }
+
+    fn capabilities(&self) -> WidgetCapabilities<'_> {
+        WidgetCapabilities::new().semantics(self)
+    }
+
+    fn append_paint(
+        &self,
+        primitives: &mut Vec<PaintPrimitive>,
+        bounds: Rect,
+        _layout: &LayoutOutput,
+        theme: &ThemeTokens,
+    ) {
+        let text_rect = header_button_text_rect(bounds);
+        let fill = if self.button.common.state.pressed {
+            theme.accent_copper.with_alpha(96)
+        } else if self.button.common.state.hovered {
+            header_button_hover_fill(theme)
+        } else {
+            theme.surface_base
+        };
+        primitives.push(PaintPrimitive::FillRect(PaintFillRect {
+            widget_id: self.button.common.id,
+            rect: bounds,
+            color: fill,
+        }));
+        primitives.push(PaintPrimitive::StrokeRect(PaintStrokeRect {
+            widget_id: self.button.common.id,
+            rect: bounds,
+            color: if self.button.common.state.focused {
+                theme.accent_warning
+            } else {
+                theme.border_emphasis
+            },
+            width: 1.0,
+        }));
+        primitives.push(PaintPrimitive::Text(PaintTextRun {
+            widget_id: self.button.common.id,
+            text: PaintText::from_static("?"),
+            rect: text_rect,
+            font_size: WINDOW_HEADER_BUTTON_FONT_SIZE,
+            baseline: Some(header_button_text_baseline(text_rect)),
+            color: theme.text_primary,
+            align: PaintTextAlign::Center,
+            wrap: radiant::widgets::TextWrap::None,
+        }));
+    }
+}
+
+impl WidgetSemantics for WaveHelpButtonWidget {
+    fn automation_role(&self) -> AutomationRole {
+        AutomationRole::Button
+    }
+
+    fn automation_label(&self) -> Option<String> {
+        Some("Show WAVE help".to_owned())
+    }
+
+    fn automation_description(&self) -> Option<String> {
+        Some("Open the WAVE help panel".to_owned())
+    }
+}
+
+/// Non-interactive Wave help content shown in a transient panel.
+#[derive(Clone)]
+struct WaveHelpWidget {
+    common: WidgetCommon,
+}
+
+impl WaveHelpWidget {
+    fn new() -> Self {
+        Self {
+            common: WidgetCommon::fixed(0, WINDOW_HELP_WIDTH, WINDOW_HELP_HEIGHT)
+                .without_default_chrome(),
+        }
+    }
+}
+
+impl Widget for WaveHelpWidget {
+    fn common(&self) -> &WidgetCommon {
+        &self.common
+    }
+
+    fn common_mut(&mut self) -> &mut WidgetCommon {
+        &mut self.common
+    }
+
+    fn handle_input(&mut self, _bounds: Rect, _input: WidgetInput) -> Option<WidgetOutput> {
+        None
+    }
+
+    fn capabilities(&self) -> WidgetCapabilities<'_> {
+        WidgetCapabilities::new().semantics(self)
+    }
+
+    fn append_paint(
+        &self,
+        primitives: &mut Vec<PaintPrimitive>,
+        bounds: Rect,
+        _layout: &LayoutOutput,
+        theme: &ThemeTokens,
+    ) {
+        primitives.push(PaintPrimitive::FillRect(PaintFillRect {
+            widget_id: self.common.id,
+            rect: bounds.inset(1.0, 1.0, 1.0, 1.0),
+            color: theme.surface_overlay,
+        }));
+        primitives.push(PaintPrimitive::StrokeRect(PaintStrokeRect {
+            widget_id: self.common.id,
+            rect: bounds,
+            color: theme.border_emphasis,
+            width: 1.0,
+        }));
+        primitives.push(PaintPrimitive::Text(PaintTextRun {
+            widget_id: self.common.id,
+            text: PaintText::from_static("WAVE HELP"),
+            rect: Rect::from_xy_size(
+                bounds.min.x + 13.6,
+                bounds.min.y + 10.2,
+                bounds.width() - 27.2,
+                17.0,
+            ),
+            font_size: WINDOW_HEADER_BUTTON_FONT_SIZE,
+            baseline: None,
+            color: theme.accent_copper,
+            align: PaintTextAlign::Left,
+            wrap: radiant::widgets::TextWrap::None,
+        }));
+
+        let key_width = 128.0;
+        let row_top = bounds.min.y + 35.7;
+        for (index, (key, description)) in WINDOW_HELP_ROWS.into_iter().enumerate() {
+            let y = row_top + index as f32 * 20.4;
+            primitives.push(PaintPrimitive::Text(PaintTextRun {
+                widget_id: self.common.id,
+                text: PaintText::from_static(key),
+                rect: Rect::from_xy_size(bounds.min.x + 13.6, y, key_width, 17.0),
+                font_size: 10.0,
+                baseline: None,
+                color: theme.text_primary,
+                align: PaintTextAlign::Left,
+                wrap: radiant::widgets::TextWrap::None,
+            }));
+            primitives.push(PaintPrimitive::Text(PaintTextRun {
+                widget_id: self.common.id,
+                text: PaintText::from_static(description),
+                rect: Rect::from_xy_size(
+                    bounds.min.x + 13.6 + key_width,
+                    y,
+                    bounds.width() - key_width - 27.2,
+                    17.0,
+                ),
+                font_size: 10.0,
+                baseline: None,
+                color: theme.text_muted,
+                align: PaintTextAlign::Left,
+                wrap: radiant::widgets::TextWrap::None,
+            }));
+        }
+    }
+}
+
+impl WidgetSemantics for WaveHelpWidget {
+    fn automation_role(&self) -> AutomationRole {
+        AutomationRole::Text
+    }
+
+    fn automation_label(&self) -> Option<String> {
+        Some("WAVE help".to_owned())
+    }
+
+    fn automation_description(&self) -> Option<String> {
+        Some("Supported WAVE keyboard and pointer interactions".to_owned())
+    }
+}
+
 struct EditorState {
     publication: Arc<WaveformPublication>,
     view: WaveformView,
     selected_window: WindowLength,
     window_dropdown_open: bool,
+    help_open: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EditorMessage {
     ToggleWindowDropdown,
     SelectWindow(WindowLength),
+    ToggleHelp,
+    DismissTransient,
 }
 
 type EditorRuntime = DeclarativeSurfaceRuntime<
@@ -481,51 +758,152 @@ fn project_surface(state: &mut EditorState) -> Arc<UiSurface<EditorMessage>> {
             .toggle_message(EditorMessage::ToggleWindowDropdown)
             .build()
             .key("window-dropdown")
+            .id(WINDOW_DROPDOWN_WIDGET_ID)
             .width(WINDOW_DROPDOWN_WIDTH)
             .height(WINDOW_DROPDOWN_TRIGGER_HEIGHT);
-    let header_row = row([
-        text("WAVE  /  BEAT-SYNCED WAVEFORM")
-            .fill_width()
-            .key("wave-header-title"),
-        text("WINDOW").key("window-label"),
+    let window_controls = row([
+        text("WINDOW")
+            .key("window-label")
+            .width(WINDOW_HEADER_LABEL_WIDTH),
         window_dropdown,
     ])
+    .key("window-controls")
+    .spacing(WINDOW_HEADER_CONTROL_GAP)
+    .align_cross(CrossAlign::Center)
+    .height(WINDOW_HEADER_CONTROL_HEIGHT);
+    let header_brand = column([
+        row([
+            text("PortalSurfer")
+                .muted_text()
+                .width(WINDOW_HEADER_BRAND_WORDMARK_WIDTH)
+                .align_text(TextAlign::Right),
+            text("/")
+                .muted_text()
+                .width(8.5)
+                .align_text(TextAlign::Center),
+            text("WAVE")
+                .text_color(TextColorRole::Custom(ThemeTokens::dark().accent_copper))
+                .align_text(TextAlign::Right)
+                .width(35.7),
+        ])
+        .key("wave-header-brand-title")
+        .align_main(MainAlign::End)
+        .fill_width()
+        .height(WINDOW_HEADER_BRAND_TITLE_HEIGHT),
+        text(WINDOW_VERSION_LABEL)
+            .muted_text()
+            .key("wave-header-version")
+            .align_text(TextAlign::Right)
+            .fill_width()
+            .height(WINDOW_HEADER_BRAND_META_HEIGHT),
+    ])
+    .key("wave-header-brand")
+    .spacing(0.0)
+    .width(WINDOW_HEADER_BRAND_WIDTH)
+    .height(WINDOW_HEADER_BRAND_HEIGHT);
+    let help_action = custom_widget_mapped(WaveHelpButtonWidget::new(), move |_: ButtonMessage| {
+        EditorMessage::ToggleHelp
+    })
+    .key("wave-help-button")
+    .id(WINDOW_HELP_BUTTON_WIDGET_ID)
+    .size(WINDOW_HELP_BUTTON_SIZE, WINDOW_HELP_BUTTON_SIZE)
+    .tooltip("Show WAVE help");
+    let header_row = row([
+        window_controls,
+        spacer().fill_width(),
+        header_brand,
+        help_action,
+    ])
+    .key("wave-header")
+    .spacing(WINDOW_HEADER_CONTROL_GAP)
+    .align_cross(CrossAlign::Center)
     .fill_width()
     .height(WINDOW_HEADER_HEIGHT);
     let editor = column([
-        header_row.key("wave-header"),
+        header_row,
         custom_widget_direct(WaveformWidget::new(state.view)).fill(),
     ])
     .key("wave-editor")
     .fill();
     let surface = if state.window_dropdown_open {
-        stack([
+        dismissible_wave_overlay(
             editor,
             dropdown_menu_overlay_below(
-                WINDOW_DROPDOWN_MENU_X,
+                WINDOW_DROPDOWN_X,
                 WINDOW_DROPDOWN_TRIGGER_Y,
                 WINDOW_DROPDOWN_TRIGGER_HEIGHT,
                 WINDOW_DROPDOWN_GAP,
                 Some(WINDOW_DROPDOWN_MENU_WIDTH),
                 window_options.collect(),
             ),
-        ])
-        .fill()
+        )
+    } else if state.help_open {
+        dismissible_wave_overlay(editor, wave_help_overlay())
     } else {
-        editor
+        stack([editor]).key("wave-surface-stack").fill()
     };
     Arc::new(surface.into_surface())
+}
+
+fn dismissible_wave_overlay(
+    base: ViewNode<EditorMessage>,
+    overlay: ViewNode<EditorMessage>,
+) -> ViewNode<EditorMessage> {
+    stack([
+        base,
+        pointer_shield(true)
+            .filter_map(|message| match message {
+                PointerShieldMessage::PointerPress { .. } => Some(EditorMessage::DismissTransient),
+                _ => None,
+            })
+            .key("wave-transient-dismiss-layer")
+            .fill(),
+        overlay,
+    ])
+    .key("wave-surface-stack")
+    .fill()
+}
+
+fn wave_help_overlay() -> ViewNode<EditorMessage> {
+    column([
+        spacer()
+            .height(WINDOW_HEADER_HEIGHT + WINDOW_DROPDOWN_GAP)
+            .fill_width(),
+        row([
+            spacer().fill_width(),
+            custom_widget_direct(WaveHelpWidget::new())
+                .key("wave-help-panel")
+                .width(WINDOW_HELP_WIDTH)
+                .height(WINDOW_HELP_HEIGHT),
+            spacer().width(WINDOW_HELP_RIGHT_INSET),
+        ])
+        .fill_width()
+        .height(WINDOW_HELP_HEIGHT),
+        spacer().fill_height(),
+    ])
+    .key("wave-help-overlay")
+    .fill()
 }
 
 fn reduce_surface(state: &mut EditorState, message: EditorMessage) {
     match message {
         EditorMessage::ToggleWindowDropdown => {
             state.window_dropdown_open = !state.window_dropdown_open;
+            state.help_open = false;
         }
         EditorMessage::SelectWindow(window) => {
             state.selected_window = window;
             state.window_dropdown_open = false;
+            state.help_open = false;
             state.publication.set_selected_window(window);
+        }
+        EditorMessage::ToggleHelp => {
+            state.help_open = !state.help_open;
+            state.window_dropdown_open = false;
+        }
+        EditorMessage::DismissTransient => {
+            state.window_dropdown_open = false;
+            state.help_open = false;
         }
     }
 }
@@ -551,6 +929,7 @@ impl WaveEditor {
                     view: WaveformView::default(),
                     selected_window: WindowLength::DEFAULT,
                     window_dropdown_open: false,
+                    help_open: false,
                 },
                 Vector2::new(WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32),
                 project_surface,
@@ -559,6 +938,31 @@ impl WaveEditor {
             theme,
             paint_plan: SurfacePaintPlan::empty(&theme),
             last_redraw_revision: 0,
+        }
+    }
+
+    fn transient_state(&self) -> (bool, bool) {
+        let state = self.runtime.bridge().state();
+        (state.window_dropdown_open, state.help_open)
+    }
+
+    fn restore_focus_after_transient_close(
+        &mut self,
+        was_window_dropdown_open: bool,
+        was_help_open: bool,
+    ) {
+        let target = {
+            let state = self.runtime.bridge().state();
+            if was_window_dropdown_open && !state.window_dropdown_open && !state.help_open {
+                Some(WINDOW_DROPDOWN_WIDGET_ID)
+            } else if was_help_open && !state.help_open && !state.window_dropdown_open {
+                Some(WINDOW_HELP_BUTTON_WIDGET_ID)
+            } else {
+                None
+            }
+        };
+        if let Some(target) = target {
+            let _ = self.runtime.focus_widget(target);
         }
     }
 }
@@ -572,7 +976,9 @@ impl toybox::radiant_gui::RadiantEditor for WaveEditor {
     }
 
     fn dispatch_event(&mut self, event: Event) {
+        let (was_window_dropdown_open, was_help_open) = self.transient_state();
         let _ = self.runtime.dispatch_event(event);
+        self.restore_focus_after_transient_close(was_window_dropdown_open, was_help_open);
     }
 
     fn paint_plan(&mut self) -> &SurfacePaintPlan {
@@ -592,17 +998,32 @@ impl toybox::radiant_gui::RadiantEditor for WaveEditor {
     }
 
     fn dispatch_key_press(&mut self, key: WidgetKey) -> bool {
-        self.runtime.dispatch_event(Event::key_press(key)).is_some()
+        let (was_window_dropdown_open, was_help_open) = self.transient_state();
+        let handled = self.runtime.dispatch_event(Event::key_press(key)).is_some();
+        self.restore_focus_after_transient_close(was_window_dropdown_open, was_help_open);
+        handled
     }
 
     fn dispatch_character(&mut self, character: char) -> bool {
-        self.runtime
+        let (was_window_dropdown_open, was_help_open) = self.transient_state();
+        let handled = self
+            .runtime
             .dispatch_event(Event::character(character))
-            .is_some()
+            .is_some();
+        self.restore_focus_after_transient_close(was_window_dropdown_open, was_help_open);
+        handled
     }
 
     fn cancel_text_entry(&mut self) -> bool {
-        false
+        let (was_window_dropdown_open, was_help_open) = self.transient_state();
+        if !was_window_dropdown_open && !was_help_open {
+            return false;
+        }
+        let _ = self
+            .runtime
+            .dispatch_message(EditorMessage::DismissTransient);
+        self.restore_focus_after_transient_close(was_window_dropdown_open, was_help_open);
+        true
     }
 }
 
@@ -626,6 +1047,52 @@ pub const fn preferred_window_size() -> (u32, u32) {
 mod tests {
     use super::*;
     use crate::capture::EnvelopePoint;
+    use toybox::radiant_gui::RadiantEditor;
+
+    fn test_editor() -> WaveEditor {
+        WaveEditor::new(Arc::new(WaveformPublication::new()))
+    }
+
+    fn widget_rect(editor: &WaveEditor, widget_id: u64) -> Rect {
+        editor
+            .runtime
+            .layout()
+            .rects
+            .get(&widget_id)
+            .copied()
+            .unwrap_or_else(|| panic!("widget {widget_id:#x} should be laid out"))
+    }
+
+    fn center(rect: Rect) -> Point {
+        Point::new(
+            (rect.min.x + rect.max.x) * 0.5,
+            (rect.min.y + rect.max.y) * 0.5,
+        )
+    }
+
+    fn click(editor: &mut WaveEditor, point: Point) {
+        editor.dispatch_event(Event::primary_press(point));
+        editor.dispatch_event(Event::primary_release(point));
+    }
+
+    fn assert_inside(rect: Rect, width: u32, height: u32) {
+        assert!(
+            rect.min.x >= 0.0,
+            "rectangle starts outside left edge: {rect:?}"
+        );
+        assert!(
+            rect.min.y >= 0.0,
+            "rectangle starts outside top edge: {rect:?}"
+        );
+        assert!(
+            rect.max.x <= width as f32,
+            "rectangle clips right edge: {rect:?} in {width}x{height}"
+        );
+        assert!(
+            rect.max.y <= height as f32,
+            "rectangle clips bottom edge: {rect:?} in {width}x{height}"
+        );
+    }
 
     #[test]
     fn invalid_live_preview_keeps_drawing_the_latest_completed_envelope() {
@@ -828,6 +1295,257 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(waveform_lines, vec![ENVELOPE_BINS, ENVELOPE_BINS]);
     }
+
+    #[test]
+    fn header_brand_version_and_hit_targets_hold_at_supported_sizes() {
+        let mut editor = test_editor();
+        assert_eq!(WINDOW_VERSION_LABEL, env!("CARGO_PKG_VERSION"));
+
+        for (width, height) in [(640, 360), (WINDOW_WIDTH, WINDOW_HEIGHT), (1600, 1000)] {
+            editor.resize(width, height);
+            let plan = editor.paint_plan().clone();
+            for label in ["PortalSurfer", "/", "WAVE", WINDOW_VERSION_LABEL] {
+                assert_eq!(
+                    plan.text_labels()
+                        .filter(|visible| *visible == label)
+                        .count(),
+                    1,
+                    "expected one exact {label:?} label at {width}x{height}"
+                );
+            }
+            assert_eq!(
+                plan.first_text_color("WAVE"),
+                Some(ThemeTokens::dark().accent_copper)
+            );
+            assert!(!plan.contains_text("WAVE  /  BEAT-SYNCED WAVEFORM"));
+
+            let title_rect = plan.first_text_rect("WAVE").expect("WAVE brand text");
+            let version_rect = plan
+                .first_text_rect(WINDOW_VERSION_LABEL)
+                .expect("package version text");
+            assert!(version_rect.min.y >= title_rect.max.y - 0.1);
+            assert!(version_rect.max.y <= WINDOW_HEADER_HEIGHT);
+
+            let trigger = widget_rect(&editor, WINDOW_DROPDOWN_WIDGET_ID);
+            assert!((trigger.min.x - WINDOW_DROPDOWN_X).abs() < 0.1);
+            assert!((trigger.width() - WINDOW_DROPDOWN_WIDTH).abs() < 0.1);
+            assert_inside(trigger, width, height);
+
+            let help = widget_rect(&editor, WINDOW_HELP_BUTTON_WIDGET_ID);
+            assert!(help.width() >= WINDOW_HELP_BUTTON_SIZE);
+            assert!(help.height() >= WINDOW_HELP_BUTTON_SIZE);
+            assert_inside(help, width, height);
+        }
+    }
+
+    #[test]
+    fn wave_help_is_accessible_painted_and_activates_with_pointer_or_keyboard() {
+        let bounds = Rect::from_xy_size(0.0, 0.0, WINDOW_HELP_BUTTON_SIZE, WINDOW_HELP_BUTTON_SIZE);
+        let mut button = WaveHelpButtonWidget::new();
+        let semantics = button.automation_semantics();
+        assert_eq!(semantics.role, AutomationRole::Button);
+        assert_eq!(semantics.label.as_deref(), Some("Show WAVE help"));
+        assert_eq!(
+            semantics.description.as_deref(),
+            Some("Open the WAVE help panel")
+        );
+        assert!(semantics.focusable);
+
+        button.handle_input(bounds, WidgetInput::FocusChanged(true));
+        for key in [WidgetKey::Enter, WidgetKey::Space] {
+            assert_eq!(
+                button
+                    .handle_input(bounds, WidgetInput::KeyPress(key))
+                    .and_then(|output| output.typed_copied::<ButtonMessage>()),
+                Some(ButtonMessage::Activate)
+            );
+        }
+
+        let mut pointer_button = WaveHelpButtonWidget::new();
+        assert!(
+            pointer_button
+                .handle_input(bounds, WidgetInput::primary_press(Point::new(14.0, 14.0)))
+                .is_none()
+        );
+        assert_eq!(
+            pointer_button
+                .handle_input(bounds, WidgetInput::primary_release(Point::new(14.0, 14.0)))
+                .and_then(|output| output.typed_copied::<ButtonMessage>()),
+            Some(ButtonMessage::Activate)
+        );
+
+        let theme = ThemeTokens::dark();
+        let mut button_primitives = Vec::new();
+        button.append_paint(
+            &mut button_primitives,
+            bounds,
+            &LayoutOutput::default(),
+            &theme,
+        );
+        assert!(button_primitives.iter().any(|primitive| matches!(
+            primitive,
+            PaintPrimitive::Text(text) if text.text.as_str() == "?"
+        )));
+        button.handle_input(bounds, WidgetInput::FocusChanged(true));
+        let mut focused_primitives = Vec::new();
+        button.append_paint(
+            &mut focused_primitives,
+            bounds,
+            &LayoutOutput::default(),
+            &theme,
+        );
+        assert!(focused_primitives.iter().any(|primitive| matches!(
+            primitive,
+            PaintPrimitive::StrokeRect(stroke) if stroke.color == theme.accent_warning
+        )));
+
+        let panel = WaveHelpWidget::new();
+        let panel_semantics = panel.automation_semantics();
+        assert_eq!(panel_semantics.role, AutomationRole::Text);
+        assert_eq!(panel_semantics.label.as_deref(), Some("WAVE help"));
+        assert_eq!(
+            panel_semantics.description.as_deref(),
+            Some("Supported WAVE keyboard and pointer interactions")
+        );
+        assert!(!panel_semantics.focusable);
+        let mut panel_primitives = Vec::new();
+        panel.append_paint(
+            &mut panel_primitives,
+            Rect::from_xy_size(0.0, 0.0, WINDOW_HELP_WIDTH, WINDOW_HELP_HEIGHT),
+            &LayoutOutput::default(),
+            &theme,
+        );
+        assert!(panel_primitives.iter().any(|primitive| matches!(
+            primitive,
+            PaintPrimitive::Text(text) if text.text.as_str() == "WAVE HELP"
+        )));
+        for &(key, description) in &WINDOW_HELP_ROWS {
+            assert!(panel_primitives.iter().any(|primitive| matches!(
+                primitive,
+                PaintPrimitive::Text(text) if text.text.as_str() == key
+            )));
+            assert!(panel_primitives.iter().any(|primitive| matches!(
+                primitive,
+                PaintPrimitive::Text(text) if text.text.as_str() == description
+            )));
+        }
+        assert!(!panel_primitives.iter().any(|primitive| matches!(
+            primitive,
+            PaintPrimitive::Text(text) if text.text.as_str().contains("Arrow")
+        )));
+        assert!(panel_primitives.iter().any(|primitive| matches!(
+            primitive,
+            PaintPrimitive::FillRect(fill)
+                if (fill.rect.width() - (WINDOW_HELP_WIDTH - 2.0)).abs() < 0.1
+        )));
+    }
+
+    #[test]
+    fn window_dropdown_preserves_all_choices_selection_and_left_anchor() {
+        let publication = Arc::new(WaveformPublication::new());
+        let mut editor = WaveEditor::new(Arc::clone(&publication));
+        let trigger = widget_rect(&editor, WINDOW_DROPDOWN_WIDGET_ID);
+        assert!((trigger.min.x - WINDOW_DROPDOWN_X).abs() < 0.1);
+
+        click(&mut editor, center(trigger));
+        assert!(editor.runtime.bridge().state().window_dropdown_open);
+        assert!(!editor.runtime.bridge().state().help_open);
+        assert_eq!(
+            editor.runtime.focused_widget(),
+            Some(WINDOW_DROPDOWN_WIDGET_ID)
+        );
+        let plan = editor.paint_plan().clone();
+        for window in WindowLength::ALL {
+            let option_rects = plan
+                .text_runs()
+                .filter(|run| run.text.as_str() == window.label() && run.rect.min.y > trigger.max.y)
+                .map(|run| run.rect)
+                .collect::<Vec<_>>();
+            assert_eq!(option_rects.len(), 1, "missing menu option for {window:?}");
+            assert_inside(option_rects[0], WINDOW_WIDTH, WINDOW_HEIGHT);
+        }
+
+        let selected = WindowLength::EightBeats;
+        let option = plan
+            .text_runs()
+            .find(|run| run.text.as_str() == selected.label() && run.rect.min.y > trigger.max.y)
+            .map(|run| run.rect)
+            .expect("selected window option should be painted");
+        click(&mut editor, center(option));
+        assert_eq!(publication.selected_window(), selected);
+        assert!(!editor.runtime.bridge().state().window_dropdown_open);
+        assert!(!editor.runtime.bridge().state().help_open);
+        assert_eq!(
+            editor.runtime.focused_widget(),
+            Some(WINDOW_DROPDOWN_WIDGET_ID)
+        );
+        assert!(editor.paint_plan().contains_text(selected.label()));
+    }
+
+    #[test]
+    fn transient_overlays_are_mutually_exclusive_and_restore_focus_after_dismissal() {
+        let mut editor = test_editor();
+        let initial_focus_order = editor.runtime.surface().keyboard_focus_order();
+        assert!(initial_focus_order.contains(&WINDOW_DROPDOWN_WIDGET_ID));
+        assert!(initial_focus_order.contains(&WINDOW_HELP_BUTTON_WIDGET_ID));
+
+        let help = widget_rect(&editor, WINDOW_HELP_BUTTON_WIDGET_ID);
+        click(&mut editor, center(help));
+        assert!(editor.runtime.bridge().state().help_open);
+        assert!(!editor.runtime.bridge().state().window_dropdown_open);
+        assert_eq!(
+            editor.runtime.focused_widget(),
+            Some(WINDOW_HELP_BUTTON_WIDGET_ID)
+        );
+        assert_eq!(
+            editor.runtime.surface().keyboard_focus_order(),
+            initial_focus_order,
+            "pointer shield must not enter keyboard focus order"
+        );
+        assert!(editor.paint_plan().contains_text("WAVE HELP"));
+
+        assert!(editor.runtime.focus_widget(WINDOW_DROPDOWN_WIDGET_ID));
+        assert!(editor.dispatch_key_press(WidgetKey::Enter));
+        assert!(editor.runtime.bridge().state().window_dropdown_open);
+        assert!(!editor.runtime.bridge().state().help_open);
+        assert_eq!(
+            editor.runtime.focused_widget(),
+            Some(WINDOW_DROPDOWN_WIDGET_ID)
+        );
+
+        editor.dispatch_event(Event::primary_press(Point::new(
+            12.0,
+            WINDOW_HEADER_HEIGHT + 80.0,
+        )));
+        assert!(!editor.runtime.bridge().state().window_dropdown_open);
+        assert!(!editor.runtime.bridge().state().help_open);
+        assert_eq!(
+            editor.runtime.focused_widget(),
+            Some(WINDOW_DROPDOWN_WIDGET_ID)
+        );
+        assert!(!editor.cancel_text_entry());
+
+        let trigger = widget_rect(&editor, WINDOW_DROPDOWN_WIDGET_ID);
+        click(&mut editor, center(trigger));
+        assert!(editor.runtime.bridge().state().window_dropdown_open);
+        assert!(editor.cancel_text_entry());
+        assert!(!editor.runtime.bridge().state().window_dropdown_open);
+        assert_eq!(
+            editor.runtime.focused_widget(),
+            Some(WINDOW_DROPDOWN_WIDGET_ID)
+        );
+
+        assert!(editor.runtime.focus_widget(WINDOW_HELP_BUTTON_WIDGET_ID));
+        assert!(editor.dispatch_key_press(WidgetKey::Space));
+        assert!(editor.runtime.bridge().state().help_open);
+        assert!(!editor.runtime.bridge().state().window_dropdown_open);
+        assert!(editor.cancel_text_entry());
+        assert!(!editor.runtime.bridge().state().help_open);
+        assert_eq!(
+            editor.runtime.focused_widget(),
+            Some(WINDOW_HELP_BUTTON_WIDGET_ID)
+        );
+    }
 }
 
 #[cfg(all(test, feature = "screenshot-test"))]
@@ -844,6 +1562,24 @@ mod screenshot_tests {
         let mut editor = WaveEditor::new(publication);
         let plan = editor.paint_plan().clone();
         assert!(plan.contains_text(WindowLength::OneBeat.label()));
+        assert_eq!(
+            plan.text_labels()
+                .filter(|label| *label == "PortalSurfer")
+                .count(),
+            1
+        );
+        assert_eq!(plan.text_labels().filter(|label| *label == "/").count(), 1);
+        assert_eq!(
+            plan.text_labels().filter(|label| *label == "WAVE").count(),
+            1
+        );
+        assert_eq!(
+            plan.text_labels()
+                .filter(|label| *label == WINDOW_VERSION_LABEL)
+                .count(),
+            1
+        );
+        assert!(!plan.contains_text("WAVE  /  BEAT-SYNCED WAVEFORM"));
         let mut capture = toybox::radiant_gui::bundled_offscreen_capture(
             Vector2::new(WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32),
             DpiScale::ONE,
@@ -923,7 +1659,10 @@ mod screenshot_tests {
         let publication = Arc::new(WaveformPublication::new());
         let mut editor = WaveEditor::new(publication);
         let _ = editor.paint_plan();
-        let trigger = Point::new(WINDOW_WIDTH as f32 - 96.0, 16.0);
+        let trigger = Point::new(
+            WINDOW_DROPDOWN_X + WINDOW_DROPDOWN_WIDTH * 0.5,
+            WINDOW_DROPDOWN_TRIGGER_Y + WINDOW_DROPDOWN_TRIGGER_HEIGHT * 0.5,
+        );
         editor.dispatch_event(Event::primary_press(trigger));
         editor.dispatch_event(Event::primary_release(trigger));
         assert!(editor.runtime.bridge().state().window_dropdown_open);
@@ -952,17 +1691,10 @@ mod screenshot_tests {
                 assert!(rect.max.y <= WINDOW_HEIGHT as f32);
             }
         }
-        assert_eq!(
-            plan.text_labels()
-                .filter(|label| *label == "WAVE  /  BEAT-SYNCED WAVEFORM")
-                .count(),
-            1,
-            "the editor should expose one title from the outer header"
-        );
-        let title_rect = plan
-            .first_text_rect("WAVE  /  BEAT-SYNCED WAVEFORM")
-            .expect("outer header title should be painted");
-        assert!(title_rect.max.y <= WINDOW_HEADER_HEIGHT);
+        assert!(plan.contains_text("PortalSurfer"));
+        assert!(plan.contains_text("WAVE"));
+        assert!(plan.contains_text(WINDOW_VERSION_LABEL));
+        assert!(!plan.contains_text("WAVE  /  BEAT-SYNCED WAVEFORM"));
 
         let mut capture = toybox::radiant_gui::bundled_offscreen_capture(
             Vector2::new(WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32),
