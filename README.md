@@ -46,9 +46,15 @@ RC, and nightly channels, commit that version to `main`, and build from the
 resulting exact source commit. Nightlies use the same serialized release path,
 so a published nightly also advances the patch version.
 
-This creates `dist/releases/wave-v<version>-<12-char HEAD>/` containing the
-host-installable `wave-v<version>-macos.clap.zip` and
-`wave-v<version>-macos.vst3.zip` bundles, `wave-default-960x600.png`,
+The Cargo/package and installed bundle versions stay numeric. Stable publication
+uses that same numeric version; RC and nightly publication identities add the
+validated `-rc.N` or `-nightly.N` suffix. The Actions workflow derives `N` from
+its unique run number. For a local non-stable release, pass the identity
+explicitly with `--publication-version`.
+
+This creates `dist/releases/wave-v<publication-version>-<12-char HEAD>/` containing
+the host-installable `wave-v<publication-version>-macos.clap.zip` and
+`wave-v<publication-version>-macos.vst3.zip` bundles, `wave-default-960x600.png`,
 `CHANGELOG.md`, and a schema 2 `release-manifest.json`. Add `--publish` and set
 `PORTALSURFER_RELEASE_TOKEN` in the environment to capability-check and publish
 the immutable bundle through

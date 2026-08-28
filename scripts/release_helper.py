@@ -24,8 +24,16 @@ SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 TEAM_ID = re.compile(r"[A-Z0-9]{10}\Z")
 NOTARY_ID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\Z")
-SEMVER = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?\Z")
-CORE_SEMVER = re.compile(r"([0-9]+)\.([0-9]+)\.([0-9]+)\Z")
+BASE_VERSION = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+SEMVER = re.compile(rf"{BASE_VERSION}(?:[-+][0-9A-Za-z.-]+)?\Z")
+CORE_SEMVER = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
+RELEASE_CHANNELS = frozenset(("stable", "rc", "nightly"))
+CHANNEL_VERSION_PATTERNS = {
+    "stable": re.compile(rf"{BASE_VERSION}\Z"),
+    "rc": re.compile(rf"{BASE_VERSION}-rc\.[1-9][0-9]*\Z"),
+    "nightly": re.compile(rf"{BASE_VERSION}-nightly\.[1-9][0-9]*\Z"),
+}
+WORKFLOW_SEQUENCE = re.compile(r"[1-9][0-9]*\Z")
 GIT_SHA = re.compile(r"[0-9a-f]{40}\Z")
 
 
@@ -99,8 +107,63 @@ def _format_core_version(version: tuple[int, int, int]) -> str:
     return ".".join(str(part) for part in version)
 
 
+def _parse_channel_version(version: Any, channel: Any, *, field: str) -> tuple[int, int, int]:
+    if not isinstance(channel, str) or channel not in CHANNEL_VERSION_PATTERNS:
+        raise ValueError(f"{field} has an invalid release channel")
+    if not isinstance(version, str) or CHANNEL_VERSION_PATTERNS[channel].fullmatch(version) is None:
+        raise ValueError(f"{field} does not match the {channel} release version syntax")
+    return _parse_core_version(version.split("-", 1)[0], field=field)
+
+
+def validate_channel_version(version: str, channel: str) -> None:
+    """Validate the PortalSurfer version syntax for one release channel."""
+    _parse_channel_version(version, channel, field="publication version")
+
+
+def validate_publication_version(package_version: str, publication_version: str, channel: str) -> None:
+    """Validate publication identity and require its core to match Cargo."""
+    package_core = _parse_core_version(package_version, field="package version")
+    publication_core = _parse_channel_version(publication_version, channel, field="publication version")
+    if publication_core != package_core:
+        raise ValueError(
+            f"publication version {publication_version} does not match package version {package_version}"
+        )
+
+
+def derive_publication_version(package_version: str, channel: str, sequence: Any) -> str:
+    """Derive a deterministic channel identity from a numeric package version."""
+    if not isinstance(channel, str) or channel not in RELEASE_CHANNELS:
+        raise ValueError(f"invalid release channel: {channel}")
+    package_text = _format_core_version(_parse_core_version(package_version, field="package version"))
+    if channel == "stable":
+        publication_version = package_text
+    else:
+        if not isinstance(sequence, (str, int)) or isinstance(sequence, bool):
+            raise ValueError("non-stable publication versions require a positive workflow sequence")
+        sequence_text = str(sequence)
+        if WORKFLOW_SEQUENCE.fullmatch(sequence_text) is None:
+            raise ValueError("non-stable publication versions require a positive workflow sequence")
+        publication_version = f"{package_text}-{channel}.{sequence_text}"
+    validate_publication_version(package_text, publication_version, channel)
+    return publication_version
+
+
+def _history_release_core(release: dict[str, Any]) -> tuple[int, int, int]:
+    channel = release.get("channel")
+    version = release.get("version")
+    try:
+        return _parse_channel_version(version, channel, field="release version")
+    except ValueError:
+        # Older release records used the numeric package version for every
+        # channel. Preserve their high-water-mark contribution while keeping
+        # all newly generated and published manifests channel-qualified.
+        if isinstance(version, str) and CORE_SEMVER.fullmatch(version):
+            return _parse_core_version(version, field="release version")
+        raise
+
+
 def latest_release_version(document: Any) -> Optional[str]:
-    """Return the highest numeric version published on any release channel."""
+    """Return the highest package core in numeric or channel-qualified history."""
     if not isinstance(document, dict) or not isinstance(document.get("releases"), list):
         raise ValueError("release history must contain a releases array")
 
@@ -108,9 +171,9 @@ def latest_release_version(document: Any) -> Optional[str]:
     for release in document["releases"]:
         if not isinstance(release, dict):
             raise ValueError("release history contains a non-object release")
-        if release.get("channel") not in {"stable", "rc", "nightly"}:
+        if not isinstance(release.get("channel"), str) or release.get("channel") not in RELEASE_CHANNELS:
             raise ValueError("release history contains an invalid channel")
-        candidate = _parse_core_version(release.get("version"), field="release version")
+        candidate = _history_release_core(release)
         if latest is None or candidate > latest:
             latest = candidate
     return _format_core_version(latest) if latest is not None else None
@@ -227,9 +290,20 @@ def zlib_crc32(data: bytes) -> int:
     return zlib.crc32(data) & 0xFFFFFFFF
 
 
+def _resolve_publication_version(version: Optional[str], publication_version: Optional[str]) -> str:
+    if version is not None and publication_version is not None and version != publication_version:
+        raise ValueError("version and publication_version must match")
+    resolved = publication_version if publication_version is not None else version
+    if resolved is None:
+        raise ValueError("publication version is required")
+    return resolved
+
+
 def build_manifest(
     *,
-    version: str,
+    version: Optional[str] = None,
+    publication_version: Optional[str] = None,
+    package_version: Optional[str] = None,
     build_id: str,
     channel: str,
     released_at: str,
@@ -245,8 +319,13 @@ def build_manifest(
     signing_team_id: str = "",
     notary_submissions: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
-    if channel not in {"stable", "rc", "nightly"}:
+    publication_version = _resolve_publication_version(version, publication_version)
+    if not isinstance(channel, str) or channel not in RELEASE_CHANNELS:
         raise ValueError(f"invalid channel: {channel}")
+    if package_version is None:
+        validate_channel_version(publication_version, channel)
+    else:
+        validate_publication_version(package_version, publication_version, channel)
     if distribution not in {"production", "preflight"}:
         raise ValueError(f"invalid distribution: {distribution}")
     if distribution == "production" and (signing_identity_class != "Developer ID Application" or not notarized or not stapled or not isinstance(signing_team_id, str) or not TEAM_ID.fullmatch(signing_team_id) or set(notary_submissions or {}) != {"clap", "vst3"} or any(not isinstance(notary_id, str) or not NOTARY_ID.fullmatch(notary_id) for notary_id in (notary_submissions or {}).values())):
@@ -271,12 +350,12 @@ def build_manifest(
     changelog_hash, changelog_size = file_digest(changelog)
     if changelog_size == 0:
         raise ValueError("CHANGELOG.md must not be empty")
-    validate_release_fields(version, released_at, [item["name"] for item in artifacts] + [screenshot.name, changelog.name], [item["sha256"] for item in artifacts] + [screenshot_info["hash"], changelog_hash], [item["size_bytes"] for item in artifacts] + [screenshot_info["size"], changelog_size])
+    validate_release_fields(publication_version, released_at, [item["name"] for item in artifacts] + [screenshot.name, changelog.name], [item["sha256"] for item in artifacts] + [screenshot_info["hash"], changelog_hash], [item["size_bytes"] for item in artifacts] + [screenshot_info["size"], changelog_size])
     return {
         "schema_version": MANIFEST_SCHEMA,
         "product": "wave",
         "build_id": build_id,
-        "version": version,
+        "version": publication_version,
         "channel": channel,
         "released_at": released_at,
         "source": {"repository": "PORTALSURFER/wave", "git_sha": git_sha, "dirty": False},
@@ -512,7 +591,7 @@ def _validate_exact_manifest_names(manifest: dict[str, Any]) -> None:
         raise ValueError("manifest support-file roles or names do not match the WAVE release contract")
 
 
-def publish_release(*, endpoint: str, token: str, manifest_path: Path, root: Optional[Path] = None, repo_root: Optional[Path] = None) -> None:
+def publish_release(*, endpoint: str, token: str, manifest_path: Path, root: Optional[Path] = None, repo_root: Optional[Path] = None, package_version: Optional[str] = None) -> None:
     """Validate and publish one production WAVE manifest through the real request path."""
     if endpoint != PRODUCTION_ORIGIN:
         raise ValueError(f"production publishing requires exact origin {PRODUCTION_ORIGIN}")
@@ -530,7 +609,7 @@ def publish_release(*, endpoint: str, token: str, manifest_path: Path, root: Opt
         raise ValueError(f"could not load release manifest: {manifest_path}") from error
     if not isinstance(manifest, dict) or canonical_json(manifest) != manifest_bytes:
         raise ValueError("release manifest is not canonical JSON")
-    validate_publish_manifest(manifest, artifact_root)
+    validate_publish_manifest(manifest, artifact_root, package_version=package_version)
     _validate_exact_manifest_names(manifest)
     _validate_canonical_source(manifest, source_root)
     expected_team = manifest["signing"]["team_id"]
@@ -546,10 +625,16 @@ def publish_release(*, endpoint: str, token: str, manifest_path: Path, root: Opt
     _publish_validated_manifest(endpoint=endpoint, token=token, manifest=manifest, root=artifact_root, transport=_request)
 
 
-def validate_publish_manifest(manifest: dict[str, Any], root: Path, *, require_production: bool = True) -> None:
+def validate_publish_manifest(manifest: dict[str, Any], root: Path, *, require_production: bool = True, package_version: Optional[str] = None) -> None:
     if manifest.get("schema_version") != MANIFEST_SCHEMA or manifest.get("product") != "wave":
         raise ValueError("publish requires WAVE manifest schema 2")
     build_id = manifest.get("build_id")
+    channel = manifest.get("channel")
+    version = manifest.get("version")
+    if package_version is None:
+        validate_channel_version(version, channel)
+    else:
+        validate_publication_version(package_version, version, channel)
     source = manifest.get("source", {})
     signing = manifest.get("signing", {})
     if not isinstance(signing, dict):
@@ -599,7 +684,7 @@ def validate_publish_manifest(manifest: dict[str, Any], root: Path, *, require_p
         raise ValueError("publish changelog metadata does not match the release contract")
 
 
-def validate_preflight_manifest(manifest: dict[str, Any], root: Path) -> None:
+def validate_preflight_manifest(manifest: dict[str, Any], root: Path, *, package_version: Optional[str] = None) -> None:
     """Validate local preflight provenance and the same file/metadata contract as publish."""
-    validate_publish_manifest(manifest, root, require_production=False)
+    validate_publish_manifest(manifest, root, require_production=False, package_version=package_version)
     _validate_exact_manifest_names(manifest)
