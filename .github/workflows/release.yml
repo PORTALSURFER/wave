@@ -52,6 +52,7 @@ jobs:
           RELEASE_CHANNEL: ${{ inputs.channel }}
           RELEASES_URL: https://portalsurfer.org/plugins/api/v1/products/wave/releases
           SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}
+          WORKFLOW_RUN_NUMBER: ${{ github.run_number }}
         shell: bash
         run: |
           set -euo pipefail
@@ -74,6 +75,7 @@ jobs:
               should_release = release_helper.should_release(source_sha=source_sha, document=document, channel=channel, only_if_changed=only_if_changed)
               package_version = tomllib.loads(Path("Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]
               release_version = release_helper.next_release_version(package_version, document)
+              publication_version = release_helper.derive_publication_version(release_version, channel, os.environ.get("WORKFLOW_RUN_NUMBER"))
           except (OSError, json.JSONDecodeError, ValueError) as error:
               print(f"::error::Could not validate public release history: {error}", file=sys.stderr)
               raise SystemExit(1)
@@ -81,6 +83,7 @@ jobs:
               output.write(f"should_release={str(should_release).lower()}\n")
               output.write(f"latest_source_sha={latest_source_sha or ''}\n")
               output.write(f"release_version={release_version}\n")
+              output.write(f"publication_version={publication_version}\n")
           print(f"latest source SHA decision: {'publish' if should_release else 'no-op'}")
           print(f"selected release version: {release_version}")
           PY
@@ -149,12 +152,14 @@ jobs:
           APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
           APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
           APPLE_CODESIGN_IDENTITY: ${{ secrets.APPLE_CODESIGN_IDENTITY }}
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+          RELEASE_PUBLICATION_VERSION: ${{ steps.gate.outputs.publication_version }}
         run: |
           set -euo pipefail
           if [[ "${{ inputs.publish }}" == true ]]; then
-            bash scripts/release.sh --publish --channel "${{ inputs.channel }}"
+            bash scripts/release.sh --publish --channel "${RELEASE_CHANNEL}" --publication-version "${RELEASE_PUBLICATION_VERSION}"
           else
-            bash scripts/release.sh --package-only --channel "${{ inputs.channel }}"
+            bash scripts/release.sh --package-only --channel "${RELEASE_CHANNEL}" --publication-version "${RELEASE_PUBLICATION_VERSION}"
           fi
 
       - name: Upload immutable bundle for inspection

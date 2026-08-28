@@ -12,7 +12,10 @@ Usage: scripts/release.sh (--package-only | --publish | --preflight) [options]
 Options:
   --channel stable|rc|nightly  Release channel (default: stable)
   --version VERSION            Must match Cargo.toml (default: package version)
-  --build-id ID                Immutable id (default: wave-v<version>-<12-char HEAD>)
+  --publication-version VERSION
+                               Manifest/artifact identity; stable must be numeric,
+                               rc/nightly must include a positive channel sequence
+  --build-id ID                Immutable id (default: wave-v<publication-version>-<12-char HEAD>)
   --released-at ISO8601        Release timestamp (default: current UTC time)
   --endpoint URL               PortalSurfer origin (default: https://portalsurfer.org)
   --source-ref REF             Require a non-detached checkout of REF
@@ -30,6 +33,7 @@ EOF
 mode=""
 channel="stable"
 requested_version=""
+requested_publication_version=""
 build_id=""
 released_at=""
 endpoint="https://portalsurfer.org"
@@ -41,6 +45,7 @@ while [[ $# -gt 0 ]]; do
       mode="${1#--}"; shift ;;
     --channel) channel="${2:?missing channel}"; shift 2 ;;
     --version) requested_version="${2:?missing version}"; shift 2 ;;
+    --publication-version) requested_publication_version="${2:?missing publication version}"; shift 2 ;;
     --build-id) build_id="${2:?missing build id}"; shift 2 ;;
     --released-at) released_at="${2:?missing released-at}"; shift 2 ;;
     --endpoint) endpoint="${2:?missing endpoint}"; shift 2 ;;
@@ -66,7 +71,7 @@ if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
   exit 1
 fi
 
-version="$(cargo metadata --locked --no-deps --format-version=1 --manifest-path "${repo_root}/Cargo.toml" \
+package_version="$(cargo metadata --locked --no-deps --format-version=1 --manifest-path "${repo_root}/Cargo.toml" \
   | python3 -c 'import json, pathlib, sys
 manifest_path = pathlib.Path(sys.argv[1]).resolve()
 for package in json.load(sys.stdin)["packages"]:
@@ -76,11 +81,20 @@ for package in json.load(sys.stdin)["packages"]:
 else:
     raise SystemExit(f"package manifest not found: {manifest_path}")' "${repo_root}/Cargo.toml"
 )"
-if [[ -n "${requested_version}" && "${requested_version}" != "${version}" ]]; then
-  echo "requested version ${requested_version} does not match Cargo.toml ${version}" >&2
+if [[ -n "${requested_version}" && "${requested_version}" != "${package_version}" ]]; then
+  echo "requested version ${requested_version} does not match Cargo.toml ${package_version}" >&2
   exit 1
 fi
-version="${requested_version:-${version}}"
+publication_version="${requested_publication_version:-${package_version}}"
+PYTHONDONTWRITEBYTECODE=1 python3 - "${package_version}" "${publication_version}" "${channel}" <<'PY'
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path("scripts").resolve()))
+from release_helper import validate_publication_version
+
+validate_publication_version(sys.argv[1], sys.argv[2], sys.argv[3])
+PY
 git_sha="$(git rev-parse HEAD)"
 [[ "${git_sha}" =~ ^[0-9a-f]{40}$ ]] || { echo "could not resolve an exact source SHA" >&2; exit 1; }
 if [[ "${mode}" != preflight ]]; then
@@ -88,7 +102,7 @@ if [[ "${mode}" != preflight ]]; then
   canonical_main="$(git rev-parse refs/remotes/origin/main 2>/dev/null || true)"
   [[ -n "${canonical_main}" && "${git_sha}" == "${canonical_main}" ]] || { echo "production release source must equal origin/main (${canonical_main:-unavailable})" >&2; exit 1; }
 fi
-build_id="${build_id:-wave-v${version}-${git_sha:0:12}}"
+build_id="${build_id:-wave-v${publication_version}-${git_sha:0:12}}"
 [[ "${build_id}" =~ ^[a-z0-9][a-z0-9._-]{1,127}$ ]] || { echo "invalid build id" >&2; exit 2; }
 released_at="${released_at:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}"
 [[ -s CHANGELOG.md ]] || { echo "CHANGELOG.md must not be empty" >&2; exit 1; }
@@ -190,8 +204,8 @@ build_bundle() {
 <key>CFBundleIdentifier</key><string>com.portalsurfer.wave.${format}</string>
 <key>CFBundleName</key><string>WAVE</string>
 <key>CFBundlePackageType</key><string>BNDL</string>
-<key>CFBundleShortVersionString</key><string>${version}</string>
-<key>CFBundleVersion</key><string>${version}</string>
+<key>CFBundleShortVersionString</key><string>${package_version}</string>
+<key>CFBundleVersion</key><string>${package_version}</string>
 </dict></plist>
 EOF
   printf 'BNDL????' > "${contents}/PkgInfo"
@@ -299,42 +313,42 @@ TOYBOX_ACTIVE_ARTIFACT=clap CARGO_TARGET_DIR="${clap_target}" cargo build --lock
 clap_binary="${clap_target}/release/libwave.dylib"
 [[ -f "${clap_binary}" ]] || { echo "CLAP build did not produce ${clap_binary}" >&2; exit 1; }
 clap_bundle="${tmp_root}/wave.clap"
-build_bundle clap "${release_dir}/wave-v${version}-macos.clap.zip" "${clap_bundle}" "${clap_binary}"
-audit_zip clap "${release_dir}/wave-v${version}-macos.clap.zip" "${signing_team_id}"
+build_bundle clap "${release_dir}/wave-v${publication_version}-macos.clap.zip" "${clap_bundle}" "${clap_binary}"
+audit_zip clap "${release_dir}/wave-v${publication_version}-macos.clap.zip" "${signing_team_id}"
 
 echo "[release] building VST3"
 TOYBOX_ACTIVE_ARTIFACT=vst3 VST3_SDK_DIR="${VST3_SDK_DIR}" CARGO_TARGET_DIR="${vst3_target}" cargo rustc --locked --release --features vst3 -- -C link-arg=-Wl,-bundle
 vst3_binary="${vst3_target}/release/libwave.dylib"
 [[ -f "${vst3_binary}" ]] || { echo "VST3 build did not produce ${vst3_binary}" >&2; exit 1; }
 vst3_bundle="${tmp_root}/wave.vst3"
-build_bundle vst3 "${release_dir}/wave-v${version}-macos.vst3.zip" "${vst3_bundle}" "${vst3_binary}"
-audit_zip vst3 "${release_dir}/wave-v${version}-macos.vst3.zip" "${signing_team_id}"
+build_bundle vst3 "${release_dir}/wave-v${publication_version}-macos.vst3.zip" "${vst3_bundle}" "${vst3_binary}"
+audit_zip vst3 "${release_dir}/wave-v${publication_version}-macos.vst3.zip" "${signing_team_id}"
 
 cp CHANGELOG.md "${release_dir}/CHANGELOG.md"
 if [[ "${mode}" == preflight ]]; then
-  python3 - "${release_dir}" "${version}" "${build_id}" "${channel}" "${released_at}" "${git_sha}" <<'PY'
+  python3 - "${release_dir}" "${publication_version}" "${package_version}" "${build_id}" "${channel}" "${released_at}" "${git_sha}" <<'PY'
 import pathlib
 import sys
 sys.path.insert(0, str(pathlib.Path("scripts").resolve()))
 from release_helper import build_manifest, canonical_json, validate_preflight_manifest
 root = pathlib.Path(sys.argv[1])
-manifest = build_manifest(version=sys.argv[2], build_id=sys.argv[3], channel=sys.argv[4], released_at=sys.argv[5], git_sha=sys.argv[6], clap=root / f"wave-v{sys.argv[2]}-macos.clap.zip", vst3=root / f"wave-v{sys.argv[2]}-macos.vst3.zip", screenshot=root / "wave-default-960x600.png", changelog=root / "CHANGELOG.md", distribution="preflight", signing_identity_class="ad hoc", notarized=False, stapled=False)
+manifest = build_manifest(publication_version=sys.argv[2], package_version=sys.argv[3], build_id=sys.argv[4], channel=sys.argv[5], released_at=sys.argv[6], git_sha=sys.argv[7], clap=root / f"wave-v{sys.argv[2]}-macos.clap.zip", vst3=root / f"wave-v{sys.argv[2]}-macos.vst3.zip", screenshot=root / "wave-default-960x600.png", changelog=root / "CHANGELOG.md", distribution="preflight", signing_identity_class="ad hoc", notarized=False, stapled=False)
 (root / "release-manifest.json").write_bytes(canonical_json(manifest))
-validate_preflight_manifest(manifest, root)
+validate_preflight_manifest(manifest, root, package_version=sys.argv[3])
 PY
 else
-  python3 - "${release_dir}" "${version}" "${build_id}" "${channel}" "${released_at}" "${git_sha}" "${signing_team_id}" "${clap_notary_id}" "${vst3_notary_id}" <<'PY'
+  python3 - "${release_dir}" "${publication_version}" "${package_version}" "${build_id}" "${channel}" "${released_at}" "${git_sha}" "${signing_team_id}" "${clap_notary_id}" "${vst3_notary_id}" <<'PY'
 import json, pathlib, sys
 sys.path.insert(0, str(pathlib.Path("scripts").resolve()))
 from release_helper import build_manifest, canonical_json
 root = pathlib.Path(sys.argv[1])
-manifest = build_manifest(version=sys.argv[2], build_id=sys.argv[3], channel=sys.argv[4], released_at=sys.argv[5], git_sha=sys.argv[6], clap=root / f"wave-v{sys.argv[2]}-macos.clap.zip", vst3=root / f"wave-v{sys.argv[2]}-macos.vst3.zip", screenshot=root / "wave-default-960x600.png", changelog=root / "CHANGELOG.md", distribution="production", signing_identity_class="Developer ID Application", notarized=True, stapled=True, signing_team_id=sys.argv[7], notary_submissions={"clap": sys.argv[8], "vst3": sys.argv[9]})
+manifest = build_manifest(publication_version=sys.argv[2], package_version=sys.argv[3], build_id=sys.argv[4], channel=sys.argv[5], released_at=sys.argv[6], git_sha=sys.argv[7], clap=root / f"wave-v{sys.argv[2]}-macos.clap.zip", vst3=root / f"wave-v{sys.argv[2]}-macos.vst3.zip", screenshot=root / "wave-default-960x600.png", changelog=root / "CHANGELOG.md", distribution="production", signing_identity_class="Developer ID Application", notarized=True, stapled=True, signing_team_id=sys.argv[8], notary_submissions={"clap": sys.argv[9], "vst3": sys.argv[10]})
 (root / "release-manifest.json").write_bytes(canonical_json(manifest))
 PY
 fi
 
 if [[ "${mode}" == publish ]]; then
-  python3 - "${release_dir}" "${endpoint}" <<'PY'
+  python3 - "${release_dir}" "${endpoint}" "${package_version}" <<'PY'
 import os
 import pathlib
 import sys
@@ -349,6 +363,7 @@ publish_release(
     manifest_path=root / "release-manifest.json",
     root=root,
     repo_root=pathlib.Path.cwd(),
+    package_version=sys.argv[3],
 )
 PY
 fi
