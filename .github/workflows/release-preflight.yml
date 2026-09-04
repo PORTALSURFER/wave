@@ -9,6 +9,7 @@ on:
       - src/**
       - scripts/release.sh
       - scripts/release_helper.py
+      - scripts/release_preflight_gate.py
       - scripts/windows_release_helper.py
       - tests/release_pipeline_integration.py
       - tests/release_helper_test.py

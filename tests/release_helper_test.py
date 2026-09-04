@@ -13,6 +13,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
 import release_helper
+import release_preflight_gate
 import bump_version
 
 
@@ -311,10 +312,237 @@ class ReleaseHelperTests(unittest.TestCase):
         self.assertIn("always()", workflow)
         self.assertIn("group: wave-release", workflow)
 
+    def test_publisher_preflight_gate_parses_latest_approved_evidence(self):
+        source_sha = "a" * 40
+        run = {
+            "id": 101,
+            "name": release_preflight_gate.WORKFLOW_NAME,
+            "path": release_preflight_gate.WORKFLOW_PATH,
+            "event": "push",
+            "head_branch": "main",
+            "head_sha": source_sha,
+            "status": "completed",
+            "conclusion": "success",
+            "run_attempt": 2,
+        }
+        publisher_job = {
+            "id": 303,
+            "name": release_preflight_gate.PUBLISHER_JOB,
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": source_sha,
+            "head_branch": "main",
+            "run_id": run["id"],
+            "run_attempt": run["run_attempt"],
+            "workflow_name": release_preflight_gate.WORKFLOW_NAME,
+            "environment": None,
+        }
+        approvals = [
+            {
+                "state": "approved",
+                "environments": [{"id": 505, "name": release_preflight_gate.PUBLISHER_ENVIRONMENT}],
+                "user": {"login": "PORTALSURFER"},
+            }
+        ]
+
+        older_run = dict(run)
+        older_run["id"] = 100
+        older_run["run_attempt"] = 9
+        evidence = release_preflight_gate.validate_evidence(
+            {"workflow_runs": [older_run, run]},
+            dict(run),
+            {"jobs": [{"id": 302, "name": "prepare"}, publisher_job]},
+            approvals,
+            source_sha=source_sha,
+        )
+
+        self.assertEqual(
+            evidence,
+            release_preflight_gate.GateEvidence(run_id=101, run_attempt=2, job_id=303, approver="PORTALSURFER"),
+        )
+
+    def test_publisher_preflight_gate_rejects_newer_failed_run(self):
+        source_sha = "a" * 40
+        older_success = {
+            "id": 100,
+            "name": release_preflight_gate.WORKFLOW_NAME,
+            "path": release_preflight_gate.WORKFLOW_PATH,
+            "event": "push",
+            "head_branch": "main",
+            "head_sha": source_sha,
+            "status": "completed",
+            "conclusion": "success",
+            "run_attempt": 1,
+        }
+        newer_failure = dict(older_success)
+        newer_failure.update(id=101, conclusion="failure")
+
+        with self.assertRaisesRegex(release_preflight_gate.GateError, "latest exact-SHA workflow run"):
+            release_preflight_gate.parse_successful_run(
+                {"workflow_runs": [newer_failure, older_success]},
+                source_sha,
+            )
+
+    def test_publisher_preflight_gate_rejects_untrusted_evidence(self):
+        source_sha = "a" * 40
+        valid_run = {
+            "id": 101,
+            "name": release_preflight_gate.WORKFLOW_NAME,
+            "path": release_preflight_gate.WORKFLOW_PATH,
+            "event": "push",
+            "head_branch": "main",
+            "head_sha": source_sha,
+            "status": "completed",
+            "conclusion": "success",
+            "run_attempt": 1,
+        }
+
+        for field, value in (
+            ("event", "pull_request"),
+            ("head_branch", "codex/wave-windows-release"),
+            ("head_sha", "b" * 40),
+            ("status", "queued"),
+            ("conclusion", "failure"),
+        ):
+            with self.subTest(run_field=field):
+                bad_run = dict(valid_run)
+                bad_run[field] = value
+                with self.assertRaises(release_preflight_gate.GateError):
+                    release_preflight_gate.parse_successful_run({"workflow_runs": [bad_run]}, source_sha)
+
+        valid_job = {
+            "id": 303,
+            "name": release_preflight_gate.PUBLISHER_JOB,
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": source_sha,
+            "head_branch": "main",
+            "run_id": 101,
+            "run_attempt": 1,
+            "workflow_name": release_preflight_gate.WORKFLOW_NAME,
+        }
+        for field, value in (
+            ("status", "skipped"),
+            ("conclusion", "failure"),
+            ("head_sha", "b" * 40),
+            ("head_branch", "feature"),
+            ("run_attempt", 2),
+        ):
+            with self.subTest(job_field=field):
+                bad_job = dict(valid_job)
+                bad_job[field] = value
+                with self.assertRaises(release_preflight_gate.GateError):
+                    release_preflight_gate.parse_publisher_job(
+                        {"jobs": [bad_job]}, source_sha=source_sha, run_id=101, run_attempt=1
+                    )
+
+        valid_approval = {
+            "state": "approved",
+            "environments": [{"id": 505, "name": release_preflight_gate.PUBLISHER_ENVIRONMENT}],
+            "user": {"login": "PORTALSURFER"},
+        }
+        for bad_approval in (
+            [],
+            [{**valid_approval, "state": "rejected"}],
+            [{**valid_approval, "environments": [{"id": 505, "name": "production"}]}],
+            [{**valid_approval, "user": None}],
+            [{**valid_approval, "environments": [{"id": "505", "name": release_preflight_gate.PUBLISHER_ENVIRONMENT}]}],
+        ):
+            with self.subTest(approval=bad_approval):
+                with self.assertRaises(release_preflight_gate.GateError):
+                    release_preflight_gate.parse_publisher_approval(bad_approval)
+
+    def test_publisher_preflight_gate_fetches_only_read_api_evidence(self):
+        source_sha = "a" * 40
+        run = {
+            "id": 101,
+            "name": release_preflight_gate.WORKFLOW_NAME,
+            "path": release_preflight_gate.WORKFLOW_PATH,
+            "event": "push",
+            "head_branch": "main",
+            "head_sha": source_sha,
+            "status": "completed",
+            "conclusion": "success",
+            "run_attempt": 1,
+        }
+        jobs = {
+            "jobs": [
+                {
+                    "id": 303,
+                    "name": release_preflight_gate.PUBLISHER_JOB,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "head_sha": source_sha,
+                    "head_branch": "main",
+                    "run_id": 101,
+                    "run_attempt": 1,
+                    "workflow_name": release_preflight_gate.WORKFLOW_NAME,
+                }
+            ]
+        }
+        approvals = [
+            {
+                "state": "approved",
+                "environments": [{"id": 505, "name": release_preflight_gate.PUBLISHER_ENVIRONMENT}],
+                "user": {"login": "PORTALSURFER"},
+            }
+        ]
+        with mock.patch.object(
+            release_preflight_gate,
+            "_api_json",
+            side_effect=[{"workflow_runs": [run]}, run, jobs, approvals],
+        ) as api:
+            evidence = release_preflight_gate.fetch_evidence(
+                api_base="https://api.example",
+                repository="PORTALSURFER/wave",
+                source_sha=source_sha,
+                token="workflow-token",
+            )
+
+        self.assertEqual(evidence.job_id, 303)
+        self.assertEqual(
+            [call.args[2] for call in api.call_args_list],
+            [
+                "actions/workflows/release-preflight.yml/runs",
+                "actions/runs/101/attempts/1",
+                "actions/runs/101/attempts/1/jobs",
+                "actions/runs/101/approvals",
+            ],
+        )
+        self.assertEqual(
+            api.call_args_list[0].kwargs,
+            {"event": "push", "branch": "main", "head_sha": source_sha, "status": "completed", "per_page": "100"},
+        )
+        for call in api.call_args_list:
+            self.assertEqual(call.args[3], "workflow-token")
+
+    def test_release_workflow_gates_publish_before_production(self):
+        root = Path(__file__).parents[1]
+        workflow = (root / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        gate_start = workflow.index("\n  publisher_preflight_gate:\n")
+        macos_start = workflow.index("\n  macos_release:\n")
+        gate_block = workflow[gate_start:macos_start]
+        macos_block = workflow[macos_start:]
+
+        self.assertIn("needs: prepare", gate_block)
+        self.assertIn("if: inputs.publish == true", gate_block)
+        self.assertIn("permissions:\n      contents: read\n      actions: read", gate_block)
+        self.assertIn("GITHUB_TOKEN: ${{ github.token }}", gate_block)
+        self.assertIn("scripts/release_preflight_gate.py", gate_block)
+        self.assertIn('ref: ${{ github.sha }}', gate_block)
+        self.assertNotIn('test "$(git symbolic-ref --quiet --short HEAD)" = main', gate_block)
+        self.assertNotIn("actions/download-artifact", gate_block)
+        self.assertNotIn("secrets.", gate_block)
+        self.assertNotIn("environment:", gate_block)
+        self.assertIn("needs: [prepare, windows, publisher_preflight_gate]", macos_block)
+        self.assertIn("inputs.publish != true || needs.publisher_preflight_gate.result == 'success'", macos_block)
+        self.assertLess(gate_start, macos_start)
+        self.assertLess(macos_block.index("inputs.publish != true"), macos_block.index("environment: production"))
+
     def test_release_preflight_covers_workflow_and_helper_changes(self):
         workflow = (Path(__file__).parents[1] / ".github" / "workflows" / "release-preflight.yml").read_text(encoding="utf-8")
         harness = (Path(__file__).parents[1] / "tests" / "release_pipeline_integration.py").read_text(encoding="utf-8")
-        for path in (".github/workflows/release.yml", ".github/workflows/windows-release.yml", ".github/workflows/nightly.yml", "scripts/release_helper.py", "scripts/windows_release_helper.py", "tests/release_helper_test.py", "tests/windows_release_helper_test.py"):
+        for path in (".github/workflows/release.yml", ".github/workflows/windows-release.yml", ".github/workflows/nightly.yml", "scripts/release_helper.py", "scripts/release_preflight_gate.py", "scripts/windows_release_helper.py", "tests/release_helper_test.py", "tests/windows_release_helper_test.py"):
             self.assertIn(path, workflow)
         self.assertNotIn("      - scripts/bump_version.py", workflow)
         self.assertIn("python3 tests/release_helper_test.py", workflow)
