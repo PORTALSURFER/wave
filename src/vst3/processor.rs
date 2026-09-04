@@ -321,6 +321,7 @@ impl IComponentTrait for WaveVst3Processor {
         }
     }
 
+    #[cfg_attr(not(target_os = "windows"), allow(clippy::unnecessary_cast))]
     unsafe fn getBusInfo(
         &self,
         media_type: MediaType,
@@ -350,7 +351,7 @@ impl IComponentTrait for WaveVst3Processor {
             &mut bus.name,
         );
         bus.busType = BusTypes_::kMain as BusType;
-        bus.flags = BusInfo_::BusFlags_::kDefaultActive;
+        bus.flags = BusInfo_::BusFlags_::kDefaultActive as u32;
         kResultOk
     }
 
@@ -524,10 +525,11 @@ impl IAudioProcessorTrait for WaveVst3Processor {
 }
 
 impl IProcessContextRequirementsTrait for WaveVst3Processor {
+    #[cfg_attr(not(target_os = "windows"), allow(clippy::unnecessary_cast))]
     unsafe fn getProcessContextRequirements(&self) -> uint32 {
-        IProcessContextRequirements_::Flags_::kNeedTempo
-            | IProcessContextRequirements_::Flags_::kNeedProjectTimeMusic
-            | IProcessContextRequirements_::Flags_::kNeedTransportState
+        (IProcessContextRequirements_::Flags_::kNeedTempo as u32)
+            | (IProcessContextRequirements_::Flags_::kNeedProjectTimeMusic as u32)
+            | (IProcessContextRequirements_::Flags_::kNeedTransportState as u32)
     }
 }
 
