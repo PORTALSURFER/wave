@@ -51,7 +51,7 @@ class ReleaseHelperTests(unittest.TestCase):
         self.assertIn("secrets.WAVE_RELEASE_UPLOAD_TOKEN", workflow)
         self.assertIn("./.github/workflows/windows-release.yml", workflow)
         self.assertIn("id-token: write", workflow)
-        self.assertIn("PORTALSURFER_PUBLISHER_COMMIT: 165776d6707ab6d9e8bb76b2a8866654140ca6bc", workflow)
+        self.assertIn("PORTALSURFER_PUBLISHER_COMMIT: 12d2c089d3d135c6839013a097dbf3baebf5fdb3", workflow)
         self.assertIn("https://portalsurfer.org/plugins/api/v1/products/wave/releases", workflow)
         self.assertIn("target/ui-screenshots/wave/initial-ui-default.png", release_script)
         self.assertIn('CFBundleName</key><string>WAVE</string>', release_script)
@@ -339,7 +339,7 @@ class ReleaseHelperTests(unittest.TestCase):
         self.assertIn("repositories: portalsurfer.org", publisher_lane)
         self.assertIn("permission-contents: read", publisher_lane)
         self.assertIn("repository: PORTALSURFER/portalsurfer.org", publisher_lane)
-        self.assertIn("ref: 165776d6707ab6d9e8bb76b2a8866654140ca6bc", publisher_lane)
+        self.assertIn("ref: 12d2c089d3d135c6839013a097dbf3baebf5fdb3", publisher_lane)
         self.assertIn("token: ${{ steps.publisher_token.outputs.token }}", publisher_lane)
         self.assertIn("persist-credentials: false", publisher_lane)
         self.assertIn("--mode publisher-integration", publisher_lane)
@@ -349,7 +349,7 @@ class ReleaseHelperTests(unittest.TestCase):
             self.assertNotIn(forbidden, producer_lane)
         for contract in (
             'choices=("artifact-contract", "publisher-integration")',
-            'PUBLISHER_COMMIT = "165776d6707ab6d9e8bb76b2a8866654140ca6bc"',
+            'PUBLISHER_COMMIT = "12d2c089d3d135c6839013a097dbf3baebf5fdb3"',
             "run_artifact_contract(args)",
             "run_publisher_integration(args)",
             "_require_combined_scratch(",

@@ -282,7 +282,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: PORTALSURFER/portalsurfer.org
-          ref: 165776d6707ab6d9e8bb76b2a8866654140ca6bc
+          ref: 12d2c089d3d135c6839013a097dbf3baebf5fdb3
           token: ${{ steps.publisher_token.outputs.token }}
           path: portalsurfer-publisher
           fetch-depth: 1
@@ -291,7 +291,7 @@ jobs:
       - name: Verify pinned PortalSurfer publisher checkout
         id: publisher
         env:
-          PUBLISHER_COMMIT: 165776d6707ab6d9e8bb76b2a8866654140ca6bc
+          PUBLISHER_COMMIT: 12d2c089d3d135c6839013a097dbf3baebf5fdb3
         shell: bash
         run: |
           set -euo pipefail

@@ -29,7 +29,7 @@ env:
   VST3_SDK_REVISION: 58f8da7936800732561402d7936584ca4505de07
   # Coordinator replacement point: replace this one SHA after the shared
   # generic PortalSurfer publisher PR is merged.
-  PORTALSURFER_PUBLISHER_COMMIT: 165776d6707ab6d9e8bb76b2a8866654140ca6bc
+  PORTALSURFER_PUBLISHER_COMMIT: 12d2c089d3d135c6839013a097dbf3baebf5fdb3
 
 concurrency:
   group: wave-release

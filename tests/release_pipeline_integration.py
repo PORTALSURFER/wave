@@ -28,7 +28,7 @@ import release_helper
 import windows_release_helper
 
 
-PUBLISHER_COMMIT = "165776d6707ab6d9e8bb76b2a8866654140ca6bc"
+PUBLISHER_COMMIT = "12d2c089d3d135c6839013a097dbf3baebf5fdb3"
 TEST_RELEASE_TOKEN = "wave-integration-release-token"
 TEST_OIDC_REQUEST_TOKEN = "wave-integration-oidc-request-token"
 TEST_ATTESTATION_TOKEN = "wave-integration-attestation-token"
