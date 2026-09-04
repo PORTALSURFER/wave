@@ -27,8 +27,8 @@ env:
   PYTHONDONTWRITEBYTECODE: "1"
   VST3_SDK_REPOSITORY: https://github.com/steinbergmedia/vst3sdk.git
   VST3_SDK_REVISION: 58f8da7936800732561402d7936584ca4505de07
-  # Coordinator replacement point: replace this one SHA after the shared
-  # generic PortalSurfer publisher PR is merged.
+  # Shared generic PortalSurfer publisher PR is merged and deployed; keep this
+  # pinned SHA unchanged until the next publisher release.
   PORTALSURFER_PUBLISHER_COMMIT: 12d2c089d3d135c6839013a097dbf3baebf5fdb3
 
 concurrency:
