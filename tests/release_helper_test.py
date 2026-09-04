@@ -324,6 +324,9 @@ class ReleaseHelperTests(unittest.TestCase):
             "status": "completed",
             "conclusion": "success",
             "run_attempt": 2,
+            "run_number": 20,
+            "created_at": "2026-09-04T10:00:00Z",
+            "updated_at": "2026-09-04T10:02:00Z",
         }
         publisher_job = {
             "id": 303,
@@ -348,6 +351,7 @@ class ReleaseHelperTests(unittest.TestCase):
         older_run = dict(run)
         older_run["id"] = 100
         older_run["run_attempt"] = 9
+        older_run["run_number"] = 19
         evidence = release_preflight_gate.validate_evidence(
             {"workflow_runs": [older_run, run]},
             dict(run),
@@ -361,6 +365,65 @@ class ReleaseHelperTests(unittest.TestCase):
             release_preflight_gate.GateEvidence(run_id=101, run_attempt=2, job_id=303, approver="PORTALSURFER"),
         )
 
+    def test_publisher_preflight_gate_orders_runs_by_number_timestamp_and_id(self):
+        source_sha = "a" * 40
+        base_run = {
+            "name": release_preflight_gate.WORKFLOW_NAME,
+            "path": release_preflight_gate.WORKFLOW_PATH,
+            "event": "push",
+            "head_branch": "main",
+            "head_sha": source_sha,
+            "status": "completed",
+            "conclusion": "success",
+            "run_attempt": 1,
+            "created_at": "2026-09-04T10:00:00Z",
+            "updated_at": "2026-09-04T10:00:00Z",
+        }
+        older_number = {**base_run, "id": 300, "run_number": 20}
+        newer_timestamp = {
+            **base_run,
+            "id": 100,
+            "run_number": 21,
+            "updated_at": "2026-09-04T10:01:00+00:00",
+        }
+        stale_timestamp = {**newer_timestamp, "id": 999, "updated_at": "2026-09-04T10:00:30Z"}
+        newest_id = {**newer_timestamp, "id": 101}
+
+        self.assertEqual(
+            release_preflight_gate.parse_successful_run(
+                {"workflow_runs": [newest_id, stale_timestamp, older_number, newer_timestamp]}, source_sha
+            ),
+            (101, 1),
+        )
+
+    def test_publisher_preflight_gate_requires_strict_run_ordering_fields(self):
+        source_sha = "a" * 40
+        valid_run = {
+            "id": 101,
+            "name": release_preflight_gate.WORKFLOW_NAME,
+            "path": release_preflight_gate.WORKFLOW_PATH,
+            "event": "push",
+            "head_branch": "main",
+            "head_sha": source_sha,
+            "status": "completed",
+            "conclusion": "success",
+            "run_attempt": 1,
+            "run_number": 20,
+            "created_at": "2026-09-04T10:00:00Z",
+            "updated_at": "2026-09-04T10:02:00Z",
+        }
+
+        for field, value in (
+            ("run_number", "20"),
+            ("created_at", 123),
+            ("updated_at", "2026-09-04 10:02:00Z"),
+        ):
+            with self.subTest(run_field=field):
+                bad_run = dict(valid_run)
+                bad_run[field] = value
+                with self.assertRaises(release_preflight_gate.GateError):
+                    release_preflight_gate.parse_successful_run({"workflow_runs": [bad_run]}, source_sha)
+
     def test_publisher_preflight_gate_rejects_newer_failed_run(self):
         source_sha = "a" * 40
         older_success = {
@@ -373,9 +436,12 @@ class ReleaseHelperTests(unittest.TestCase):
             "status": "completed",
             "conclusion": "success",
             "run_attempt": 1,
+            "run_number": 20,
+            "created_at": "2026-09-04T10:00:00Z",
+            "updated_at": "2026-09-04T10:02:00Z",
         }
         newer_failure = dict(older_success)
-        newer_failure.update(id=101, conclusion="failure")
+        newer_failure.update(id=101, run_number=21, conclusion="failure", updated_at="2026-09-04T10:03:00Z")
 
         with self.assertRaisesRegex(release_preflight_gate.GateError, "latest exact-SHA workflow run"):
             release_preflight_gate.parse_successful_run(
@@ -395,6 +461,9 @@ class ReleaseHelperTests(unittest.TestCase):
             "status": "completed",
             "conclusion": "success",
             "run_attempt": 1,
+            "run_number": 20,
+            "created_at": "2026-09-04T10:00:00Z",
+            "updated_at": "2026-09-04T10:02:00Z",
         }
 
         for field, value in (
@@ -464,6 +533,9 @@ class ReleaseHelperTests(unittest.TestCase):
             "status": "completed",
             "conclusion": "success",
             "run_attempt": 1,
+            "run_number": 20,
+            "created_at": "2026-09-04T10:00:00Z",
+            "updated_at": "2026-09-04T10:02:00Z",
         }
         jobs = {
             "jobs": [

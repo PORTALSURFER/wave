@@ -9,6 +9,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -24,6 +25,9 @@ PUBLISHER_ENVIRONMENT = "publisher-integration"
 API_VERSION = "2022-11-28"
 GIT_SHA = re.compile(r"[0-9a-f]{40}\Z")
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
+RFC3339 = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\Z"
+)
 
 
 class GateError(ValueError):
@@ -56,13 +60,25 @@ def _positive_int(value: Any, label: str) -> int:
     return value
 
 
+def _rfc3339(value: Any, label: str) -> datetime:
+    if not isinstance(value, str) or not RFC3339.fullmatch(value):
+        raise GateError(f"{label} must be an RFC3339 timestamp")
+    try:
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise GateError(f"{label} must be an RFC3339 timestamp") from error
+    if timestamp.tzinfo is None:
+        raise GateError(f"{label} must be an RFC3339 timestamp")
+    return timestamp
+
+
 def _validate_source_sha(source_sha: Any) -> str:
     if not isinstance(source_sha, str) or not GIT_SHA.fullmatch(source_sha):
         raise GateError("prepared source SHA is invalid")
     return source_sha
 
 
-def _validate_run_identity(run: Any, source_sha: str, label: str) -> tuple[int, int, str]:
+def _validate_run_identity(run: Any, source_sha: str, label: str) -> tuple[int, datetime, int, int, str]:
     source_sha = _validate_source_sha(source_sha)
     document = _object(run, label)
     expected = {
@@ -77,7 +93,10 @@ def _validate_run_identity(run: Any, source_sha: str, label: str) -> tuple[int, 
         if document.get(field) != expected_value:
             raise GateError(f"{label} has invalid {field}")
     conclusion = _string(document.get("conclusion"), f"{label}.conclusion")
+    _rfc3339(document.get("created_at"), f"{label}.created_at")
     return (
+        _positive_int(document.get("run_number"), f"{label}.run_number"),
+        _rfc3339(document.get("updated_at"), f"{label}.updated_at"),
         _positive_int(document.get("id"), f"{label}.id"),
         _positive_int(document.get("run_attempt"), f"{label}.run_attempt"),
         conclusion,
@@ -92,10 +111,10 @@ def parse_successful_run(runs_document: Any, source_sha: str) -> tuple[int, int]
     if not isinstance(runs, list) or not runs:
         raise GateError("workflow runs response has no runs")
 
-    candidates: list[tuple[int, int, str]] = []
+    candidates: list[tuple[int, datetime, int, int, str]] = []
     for index, run in enumerate(runs):
         candidates.append(_validate_run_identity(run, source_sha, f"workflow run {index}"))
-    run_id, run_attempt, conclusion = max(candidates, key=lambda candidate: (candidate[0], candidate[1]))
+    _, _, run_id, run_attempt, conclusion = max(candidates, key=lambda candidate: candidate[:3])
     if conclusion != "success":
         raise GateError("latest exact-SHA workflow run did not succeed")
     return run_id, run_attempt
@@ -106,7 +125,9 @@ def parse_successful_attempt(attempt_document: Any, *, source_sha: str, run_id: 
     source_sha = _validate_source_sha(source_sha)
     run_id = _positive_int(run_id, "selected workflow run.id")
     run_attempt = _positive_int(run_attempt, "selected workflow run.run_attempt")
-    actual_run_id, actual_attempt, conclusion = _validate_run_identity(attempt_document, source_sha, "workflow run attempt")
+    _, _, actual_run_id, actual_attempt, conclusion = _validate_run_identity(
+        attempt_document, source_sha, "workflow run attempt"
+    )
     if actual_run_id != run_id or actual_attempt != run_attempt:
         raise GateError("workflow run attempt does not match the selected run")
     if conclusion != "success":
