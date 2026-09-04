@@ -6,33 +6,148 @@ on:
       channel:
         description: Release channel
         required: true
-        default: stable
+        default: nightly
         type: choice
         options: [stable, rc, nightly]
       publish:
-        description: Publish after production signing and notarization
+        description: Publish the validated manifest to PortalSurfer
         required: true
         default: false
         type: boolean
       only_if_changed:
-        description: Publish only when this channel has changed since its latest release
-        required: false
+        description: Skip a nightly whose immutable source SHA is already published
+        required: true
         default: false
         type: boolean
 
-permissions:
-  contents: write
+permissions: {}
 
 env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   PYTHONDONTWRITEBYTECODE: "1"
+  VST3_SDK_REPOSITORY: https://github.com/steinbergmedia/vst3sdk.git
+  VST3_SDK_REVISION: 58f8da7936800732561402d7936584ca4505de07
+  # Coordinator replacement point: replace this one SHA after the shared
+  # generic PortalSurfer publisher PR is merged.
+  PORTALSURFER_PUBLISHER_COMMIT: 165776d6707ab6d9e8bb76b2a8866654140ca6bc
 
 concurrency:
   group: wave-release
   cancel-in-progress: false
 
 jobs:
-  release:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      source_sha: ${{ steps.source_sha.outputs.sha }}
+      package_version: ${{ steps.metadata.outputs.package_version }}
+      publication_version: ${{ steps.metadata.outputs.publication_version }}
+      build_id: ${{ steps.metadata.outputs.build_id }}
+      released_at: ${{ steps.metadata.outputs.released_at }}
+      should_release: ${{ steps.gate.outputs.should_release }}
+    steps:
+      - name: Checkout exact main source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Capture checked-out source SHA
+        id: source_sha
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_sha="$(git rev-parse HEAD)"
+          [[ "${source_sha}" =~ ^[0-9a-f]{40}$ ]]
+          test "${source_sha}" = "${GITHUB_SHA}"
+          echo "sha=${source_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Check release source freshness
+        id: gate
+        env:
+          RELEASES_URL: https://portalsurfer.org/plugins/api/v1/products/wave/releases
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+          ONLY_IF_CHANGED: ${{ inputs.only_if_changed }}
+          SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${ONLY_IF_CHANGED}" != true ]]; then
+            should_release=true
+          else
+            curl --fail --silent --show-error --location --max-time 20 "${RELEASES_URL}" -o releases.json
+            should_release="$(PYTHONPATH=scripts python3 - "${SOURCE_SHA}" releases.json "${RELEASE_CHANNEL}" <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+          from release_helper import should_release
+          source_sha, releases_path, channel = sys.argv[1:]
+          document = json.loads(pathlib.Path(releases_path).read_text(encoding="utf-8"))
+          print(str(should_release(source_sha=source_sha, document=document, channel=channel)).lower())
+          PY
+            )"
+          fi
+          echo "should_release=${should_release}" >> "$GITHUB_OUTPUT"
+
+      - name: Compute release metadata
+        id: metadata
+        if: steps.gate.outputs.should_release == 'true'
+        env:
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+          SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}
+          WORKFLOW_SEQUENCE: ${{ github.run_number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_version="$(sed -n '/^\[package\]/,/^\[/ { s/^version[[:space:]]*=[[:space:]]*"\([^\"]*\)".*/\1/p; }' Cargo.toml | head -n 1)"
+          test -n "${package_version}"
+          publication_version="$(PYTHONPATH=scripts python3 - "${package_version}" "${RELEASE_CHANNEL}" "${WORKFLOW_SEQUENCE}" <<'PY'
+          import sys
+          from release_helper import derive_publication_version
+          package_version, channel, sequence = sys.argv[1:]
+          print(derive_publication_version(package_version, channel, sequence))
+          PY
+          )"
+          build_id="wave-v${publication_version}-${SOURCE_SHA:0:12}"
+          released_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          {
+            echo "source_sha=${SOURCE_SHA}"
+            echo "package_version=${package_version}"
+            echo "publication_version=${publication_version}"
+            echo "build_id=${build_id}"
+            echo "released_at=${released_at}"
+          } >> "$GITHUB_OUTPUT"
+
+  windows:
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true' && inputs.channel == 'nightly'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/windows-release.yml
+    with:
+      source_sha: ${{ needs.prepare.outputs.source_sha }}
+      package_version: ${{ needs.prepare.outputs.package_version }}
+      publication_version: ${{ needs.prepare.outputs.publication_version }}
+      channel: ${{ inputs.channel }}
+      build_id: ${{ needs.prepare.outputs.build_id }}
+      released_at: ${{ needs.prepare.outputs.released_at }}
+
+  macos_release:
+    needs: [prepare, windows]
+    if: >-
+      always() &&
+      needs.prepare.result == 'success' &&
+      needs.prepare.outputs.should_release == 'true' &&
+      (inputs.channel != 'nightly' || needs.windows.result == 'success')
     runs-on: macos-latest
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
     environment: production
     steps:
       - name: Checkout exact main source
@@ -40,110 +155,116 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Capture checked-out source SHA
-        id: source_sha
-        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
-      - name: Check release source freshness
-        id: gate
+      - name: Verify shared source identity
         env:
-          ONLY_IF_CHANGED: ${{ inputs.only_if_changed }}
-          RELEASE_CHANNEL: ${{ inputs.channel }}
-          RELEASES_URL: https://portalsurfer.org/plugins/api/v1/products/wave/releases
-          SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}
-          WORKFLOW_RUN_NUMBER: ${{ github.run_number }}
+          EXPECTED_GITHUB_SHA: ${{ github.sha }}
+          EXPECTED_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
         shell: bash
         run: |
           set -euo pipefail
-          releases_json="${RUNNER_TEMP}/wave-releases.json"
-          curl --fail --silent --show-error --location --max-time 30 "${RELEASES_URL}" > "${releases_json}"
-          PYTHONPATH=scripts python3 - "${SOURCE_SHA}" "${releases_json}" "$GITHUB_OUTPUT" "${RELEASE_CHANNEL}" <<'PY'
-          import json
-          import os
-          import sys
-          from pathlib import Path
-          import tomllib
-
-          import release_helper
-
-          source_sha, releases_path, output_path, channel = sys.argv[1:]
-          try:
-              document = json.loads(Path(releases_path).read_text(encoding="utf-8"))
-              only_if_changed = os.environ["ONLY_IF_CHANGED"] == "true"
-              latest_source_sha = release_helper.latest_release_source_sha(document, channel=channel) if only_if_changed else None
-              should_release = release_helper.should_release(source_sha=source_sha, document=document, channel=channel, only_if_changed=only_if_changed)
-              package_version = tomllib.loads(Path("Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]
-              release_version = release_helper.next_release_version(package_version, document)
-              publication_version = release_helper.derive_publication_version(release_version, channel, os.environ.get("WORKFLOW_RUN_NUMBER"))
-          except (OSError, json.JSONDecodeError, ValueError) as error:
-              print(f"::error::Could not validate public release history: {error}", file=sys.stderr)
-              raise SystemExit(1)
-          with open(output_path, "a", encoding="utf-8") as output:
-              output.write(f"should_release={str(should_release).lower()}\n")
-              output.write(f"latest_source_sha={latest_source_sha or ''}\n")
-              output.write(f"release_version={release_version}\n")
-              output.write(f"publication_version={publication_version}\n")
-          print(f"latest source SHA decision: {'publish' if should_release else 'no-op'}")
-          print(f"selected release version: {release_version}")
-          PY
-
-      - name: Bump package patch version
-        if: steps.gate.outputs.should_release == 'true'
-        env:
-          RELEASE_VERSION: ${{ steps.gate.outputs.release_version }}
-          SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          current_version="$(python3 -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("Cargo.toml").read_text(encoding="utf-8"))["package"]["version"])')"
-          if [[ "${current_version}" == "${RELEASE_VERSION}" ]]; then
-            echo "release version v${RELEASE_VERSION} is already present; resuming a pending release bump"
-            exit 0
-          fi
-          python3 scripts/bump_version.py "${RELEASE_VERSION}"
-          git diff --check
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock
-          git commit -m "chore(release): bump WAVE to v${RELEASE_VERSION} [skip ci]"
-          test "$(git merge-base "${SOURCE_SHA}" HEAD)" = "${SOURCE_SHA}"
-          for attempt in 1 2 3; do
-            git fetch origin main --quiet
-            if [[ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]]; then
-              git rebase origin/main
-            fi
-            if git push origin HEAD:main; then
-              exit 0
-            fi
-            if [[ "${attempt}" == 3 ]]; then
-              echo "could not publish the release version commit after ${attempt} attempts" >&2
-              exit 1
-            fi
-          done
-
-      - name: Capture release source SHA
-        id: release_source
-        if: steps.gate.outputs.should_release == 'true'
-        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          source_sha="$(git rev-parse HEAD)"
+          [[ "${source_sha}" =~ ^[0-9a-f]{40}$ ]]
+          test "${source_sha}" = "${EXPECTED_GITHUB_SHA}"
+          test "${source_sha}" = "${EXPECTED_SOURCE_SHA}"
+          test "$(git symbolic-ref --quiet --short HEAD)" = main
+          test -z "$(git status --porcelain --untracked-files=all)"
 
       - name: Install Rust
-        if: steps.gate.outputs.should_release == 'true'
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: rustfmt, clippy
 
       - name: Checkout pinned VST3 SDK
-        if: steps.gate.outputs.should_release == 'true'
+        shell: bash
         run: |
           set -euo pipefail
-          git clone https://github.com/steinbergmedia/vst3sdk.git "$RUNNER_TEMP/vst3sdk"
-          git -C "$RUNNER_TEMP/vst3sdk" fetch --depth 1 origin 58f8da7936800732561402d7936584ca4505de07
-          git -C "$RUNNER_TEMP/vst3sdk" checkout --detach 58f8da7936800732561402d7936584ca4505de07
+          git clone "${VST3_SDK_REPOSITORY}" "$RUNNER_TEMP/vst3sdk"
+          git -C "$RUNNER_TEMP/vst3sdk" fetch --depth 1 origin "${VST3_SDK_REVISION}"
+          git -C "$RUNNER_TEMP/vst3sdk" checkout --detach "${VST3_SDK_REVISION}"
+          test "$(git -C "$RUNNER_TEMP/vst3sdk" rev-parse HEAD)" = "${VST3_SDK_REVISION}"
+          test -d "$RUNNER_TEMP/vst3sdk/pluginterfaces"
           echo "VST3_SDK_DIR=$RUNNER_TEMP/vst3sdk" >> "$GITHUB_ENV"
 
+      - name: Download validated Windows nightly artifact
+        if: inputs.channel == 'nightly'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: wave-windows-${{ needs.prepare.outputs.build_id }}
+          path: ${{ runner.temp }}/wave-windows
+
+      - name: Validate Windows nightly identity
+        if: inputs.channel == 'nightly'
+        env:
+          WINDOWS_RELEASE_DIR: ${{ runner.temp }}/wave-windows
+          PACKAGE_VERSION: ${{ needs.prepare.outputs.package_version }}
+          PUBLICATION_VERSION: ${{ needs.prepare.outputs.publication_version }}
+          BUILD_ID: ${{ needs.prepare.outputs.build_id }}
+          RELEASED_AT: ${{ needs.prepare.outputs.released_at }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/windows_release_helper.py validate --root "${WINDOWS_RELEASE_DIR}" --cargo-lock Cargo.lock --vst3-sdk-revision "${VST3_SDK_REVISION}"
+          python3 - "${WINDOWS_RELEASE_DIR}" "${PACKAGE_VERSION}" "${PUBLICATION_VERSION}" "${BUILD_ID}" "${RELEASED_AT}" "${SOURCE_SHA}" <<'PY'
+          import json
+          import pathlib
+          import sys
+          root = pathlib.Path(sys.argv[1])
+          package_version, publication_version, build_id, released_at, source_sha = sys.argv[2:]
+          manifest = json.loads((root / "windows-artifact-manifest.json").read_text(encoding="utf-8"))
+          expected_archive = f"wave-v{publication_version}-windows-x86_64-unsigned.vst3.zip"
+          source = manifest.get("source")
+          if (manifest.get("package_version") != package_version or manifest.get("publication_version") != publication_version or manifest.get("build_id") != build_id or manifest.get("released_at") != released_at or not isinstance(source, dict) or source.get("git_sha") != source_sha or source.get("repository") != "PORTALSURFER/wave" or manifest.get("signing_status") != "unsigned" or manifest.get("signing_certificate") is not None or manifest.get("archive", {}).get("name") != expected_archive):
+              raise SystemExit("Windows artifact manifest does not match the shared nightly identity")
+          expected_entries = {"windows-artifact-manifest.json", expected_archive}
+          entries = list(root.iterdir())
+          if {entry.name for entry in entries} != expected_entries or any(entry.is_symlink() or not entry.is_file() for entry in entries):
+              raise SystemExit("Windows release directory must contain only the archive and its sidecar")
+          PY
+
+      - name: Create scoped PortalSurfer publisher token
+        id: publisher_token
+        if: inputs.publish == true
+        uses: actions/create-github-app-token@7e473efe3cb98aa54f8d4bac15400b15fad77d94 # v2.2.0
+        with:
+          app-id: ${{ vars.PORTALSURFER_PUBLISHER_APP_ID }}
+          private-key: ${{ secrets.PORTALSURFER_PUBLISHER_PRIVATE_KEY }}
+          owner: PORTALSURFER
+          repositories: portalsurfer.org
+          permission-contents: read
+
+      - name: Checkout exact PortalSurfer publisher
+        if: inputs.publish == true
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: PORTALSURFER/portalsurfer.org
+          ref: ${{ env.PORTALSURFER_PUBLISHER_COMMIT }}
+          token: ${{ steps.publisher_token.outputs.token }}
+          path: portalsurfer-publisher
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify and stage pinned PortalSurfer publisher
+        id: publisher
+        if: inputs.publish == true
+        shell: bash
+        run: |
+          set -euo pipefail
+          publisher_dir="${GITHUB_WORKSPACE}/portalsurfer-publisher"
+          test "$(git -C "${publisher_dir}" rev-parse HEAD)" = "${PORTALSURFER_PUBLISHER_COMMIT}"
+          ! git -C "${publisher_dir}" symbolic-ref --quiet HEAD
+          test -z "$(git -C "${publisher_dir}" status --porcelain --untracked-files=all)"
+          staged_publisher_dir="${RUNNER_TEMP}/portalsurfer-publisher"
+          rm -rf -- "${staged_publisher_dir}"
+          cp -a "${publisher_dir}" "${staged_publisher_dir}"
+          rm -rf -- "${publisher_dir}"
+          publisher_script="${staged_publisher_dir}/scripts/publish-plugin-release.mjs"
+          test -f "${publisher_script}" && test ! -L "${publisher_script}"
+          echo "path=${publisher_script}" >> "$GITHUB_OUTPUT"
+
       - name: Produce and optionally publish WAVE release
-        if: steps.gate.outputs.should_release == 'true'
         env:
           PORTALSURFER_RELEASE_TOKEN: ${{ inputs.publish && secrets.WAVE_RELEASE_UPLOAD_TOKEN || '' }}
           APPLE_DEVELOPER_ID_APPLICATION_CERT_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERT_BASE64 }}
@@ -152,21 +273,56 @@ jobs:
           APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
           APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
           APPLE_CODESIGN_IDENTITY: ${{ secrets.APPLE_CODESIGN_IDENTITY }}
+          WINDOWS_RELEASE_DIR: ${{ runner.temp }}/wave-windows
+          PUBLISHER_SCRIPT: ${{ steps.publisher.outputs.path }}
           RELEASE_CHANNEL: ${{ inputs.channel }}
-          RELEASE_PUBLICATION_VERSION: ${{ steps.gate.outputs.publication_version }}
+          RELEASE_PACKAGE_VERSION: ${{ needs.prepare.outputs.package_version }}
+          RELEASE_PUBLICATION_VERSION: ${{ needs.prepare.outputs.publication_version }}
+          RELEASE_BUILD_ID: ${{ needs.prepare.outputs.build_id }}
+          RELEASED_AT: ${{ needs.prepare.outputs.released_at }}
+          RELEASE_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        shell: bash
         run: |
           set -euo pipefail
-          if [[ "${{ inputs.publish }}" == true ]]; then
-            bash scripts/release.sh --publish --channel "${RELEASE_CHANNEL}" --publication-version "${RELEASE_PUBLICATION_VERSION}"
-          else
-            bash scripts/release.sh --package-only --channel "${RELEASE_CHANNEL}" --publication-version "${RELEASE_PUBLICATION_VERSION}"
+          release_args=(
+            --channel "${RELEASE_CHANNEL}"
+            --version "${RELEASE_PACKAGE_VERSION}"
+            --publication-version "${RELEASE_PUBLICATION_VERSION}"
+            --build-id "${RELEASE_BUILD_ID}"
+            --released-at "${RELEASED_AT}"
+            --source-ref main
+            --source-sha "${RELEASE_SOURCE_SHA}"
+          )
+          if [[ "${RELEASE_CHANNEL}" == nightly ]]; then
+            release_args+=(--windows-release-dir "${WINDOWS_RELEASE_DIR}")
           fi
+          if [[ "${{ inputs.publish }}" == true ]]; then
+            release_args+=(--publish --publisher-script "${PUBLISHER_SCRIPT:?pinned publisher path is missing}")
+          else
+            release_args+=(--package-only)
+          fi
+          bash scripts/release.sh "${release_args[@]}"
 
       - name: Upload immutable bundle for inspection
-        if: steps.gate.outputs.should_release == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: wave-release-${{ inputs.channel }}-${{ steps.release_source.outputs.sha }}
+          name: wave-release-${{ inputs.channel }}-${{ needs.prepare.outputs.source_sha }}
           path: dist/releases/*
           if-no-files-found: error
           retention-days: 3
+
+      - name: Reconcile metadata-only GitHub Release
+        if: inputs.publish == true && inputs.channel != 'nightly'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE_VERSION: ${{ needs.prepare.outputs.package_version }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="v${PACKAGE_VERSION}"
+          if gh release view "${tag}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release edit "${tag}" --repo "${{ github.repository }}" --title "${{ inputs.channel }} ${tag}" --notes "PortalSurfer manifest release; binaries are served by PortalSurfer."
+          else
+            gh release create "${tag}" --repo "${{ github.repository }}" --target "${SOURCE_SHA}" --title "${{ inputs.channel }} ${tag}" --notes "PortalSurfer manifest release; binaries are served by PortalSurfer."
+          fi

@@ -18,9 +18,17 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 MANIFEST_SCHEMA = 2
-MANIFEST_CONTENT_TYPE = "application/vnd.portalsurfer.release-manifest+json;version=2"
+MANIFEST_SCHEMA_V2 = 2
+MANIFEST_SCHEMA_V3 = 3
+MANIFEST_CONTENT_TYPES = {
+    MANIFEST_SCHEMA_V2: "application/vnd.portalsurfer.release-manifest+json;version=2",
+    MANIFEST_SCHEMA_V3: "application/vnd.portalsurfer.release-manifest+json;version=3",
+}
+MANIFEST_CONTENT_TYPE = MANIFEST_CONTENT_TYPES[MANIFEST_SCHEMA_V2]
 PRODUCTION_ORIGIN = "https://portalsurfer.org"
+WAVE_TEAM_ID = "DKTKQ8U5T8"
 SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+SAFE_BUILD_ID = re.compile(r"[a-z0-9][a-z0-9._-]{1,127}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 TEAM_ID = re.compile(r"[A-Z0-9]{10}\Z")
 NOTARY_ID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\Z")
@@ -35,6 +43,7 @@ CHANNEL_VERSION_PATTERNS = {
 }
 WORKFLOW_SEQUENCE = re.compile(r"[1-9][0-9]*\Z")
 GIT_SHA = re.compile(r"[0-9a-f]{40}\Z")
+SCREENSHOT_NAME = re.compile(r"wave-default-[0-9]+x[0-9]+\.png\Z")
 
 
 def latest_release_source_sha(document: Any, *, channel: str) -> Optional[str]:
@@ -146,54 +155,6 @@ def derive_publication_version(package_version: str, channel: str, sequence: Any
         publication_version = f"{package_text}-{channel}.{sequence_text}"
     validate_publication_version(package_text, publication_version, channel)
     return publication_version
-
-
-def _history_release_core(release: dict[str, Any]) -> tuple[int, int, int]:
-    channel = release.get("channel")
-    version = release.get("version")
-    try:
-        return _parse_channel_version(version, channel, field="release version")
-    except ValueError:
-        # Older release records used the numeric package version for every
-        # channel. Preserve their high-water-mark contribution while keeping
-        # all newly generated and published manifests channel-qualified.
-        if isinstance(version, str) and CORE_SEMVER.fullmatch(version):
-            return _parse_core_version(version, field="release version")
-        raise
-
-
-def latest_release_version(document: Any) -> Optional[str]:
-    """Return the highest package core in numeric or channel-qualified history."""
-    if not isinstance(document, dict) or not isinstance(document.get("releases"), list):
-        raise ValueError("release history must contain a releases array")
-
-    latest: tuple[int, int, int] | None = None
-    for release in document["releases"]:
-        if not isinstance(release, dict):
-            raise ValueError("release history contains a non-object release")
-        if not isinstance(release.get("channel"), str) or release.get("channel") not in RELEASE_CHANNELS:
-            raise ValueError("release history contains an invalid channel")
-        candidate = _history_release_core(release)
-        if latest is None or candidate > latest:
-            latest = candidate
-    return _format_core_version(latest) if latest is not None else None
-
-
-def next_release_version(package_version: str, document: Any) -> str:
-    """Select one globally increasing patch version for the next release.
-
-    A package version already ahead of public history is treated as a pending
-    bump from a previously interrupted release.  Reusing it avoids consuming
-    another patch number on retry; otherwise every successful release advances
-    the highest published version by exactly one patch.
-    """
-    current = _parse_core_version(package_version, field="package version")
-    latest_text = latest_release_version(document)
-    latest = _parse_core_version(latest_text, field="latest release version") if latest_text else None
-    if latest is not None and current > latest:
-        return _format_core_version(current)
-    base = latest if latest is not None and latest > current else current
-    return _format_core_version((base[0], base[1], base[2] + 1))
 
 
 def validate_release_fields(version: str, released_at: str, names: list[str], hashes: list[str], sizes: list[int]) -> None:
@@ -318,6 +279,7 @@ def build_manifest(
     stapled: bool = True,
     signing_team_id: str = "",
     notary_submissions: Optional[dict[str, str]] = None,
+    windows_vst3: Optional[Path] = None,
 ) -> dict[str, Any]:
     publication_version = _resolve_publication_version(version, publication_version)
     if not isinstance(channel, str) or channel not in RELEASE_CHANNELS:
@@ -326,6 +288,28 @@ def build_manifest(
         validate_channel_version(publication_version, channel)
     else:
         validate_publication_version(package_version, publication_version, channel)
+    if windows_vst3 is not None or (channel == "nightly" and distribution == "production"):
+        if windows_vst3 is None:
+            raise ValueError("production WAVE nightly requires the Windows artifact")
+        if channel != "nightly" or distribution != "production":
+            raise ValueError("schema 3 is only available for production WAVE nightlies")
+        return _build_schema3_manifest(
+            publication_version=publication_version,
+            build_id=build_id,
+            channel=channel,
+            released_at=released_at,
+            git_sha=git_sha,
+            clap=clap,
+            vst3=vst3,
+            screenshot=screenshot,
+            changelog=changelog,
+            signing_identity_class=signing_identity_class,
+            notarized=notarized,
+            stapled=stapled,
+            signing_team_id=signing_team_id,
+            notary_submissions=notary_submissions,
+            windows_vst3=windows_vst3,
+        )
     if distribution not in {"production", "preflight"}:
         raise ValueError(f"invalid distribution: {distribution}")
     if distribution == "production" and (signing_identity_class != "Developer ID Application" or not notarized or not stapled or not isinstance(signing_team_id, str) or not TEAM_ID.fullmatch(signing_team_id) or set(notary_submissions or {}) != {"clap", "vst3"} or any(not isinstance(notary_id, str) or not NOTARY_ID.fullmatch(notary_id) for notary_id in (notary_submissions or {}).values())):
@@ -391,6 +375,170 @@ def build_manifest(
     }
 
 
+def _validate_regular_file(path: Path, label: str) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"{label} must be a regular file: {path.name}")
+
+
+def _validated_file_digest(path: Path, label: str) -> tuple[str, int]:
+    _validate_regular_file(path, label)
+    digest, size = file_digest(path)
+    if size <= 0 or not SHA256.fullmatch(digest):
+        raise ValueError(f"{label} is empty or has an invalid hash")
+    return digest, size
+
+
+def _build_schema3_manifest(
+    *,
+    publication_version: str,
+    build_id: str,
+    channel: str,
+    released_at: str,
+    git_sha: str,
+    clap: Path,
+    vst3: Path,
+    screenshot: Path,
+    changelog: Path,
+    signing_identity_class: str,
+    notarized: bool,
+    stapled: bool,
+    signing_team_id: str,
+    notary_submissions: Optional[dict[str, str]],
+    windows_vst3: Path,
+) -> dict[str, Any]:
+    if not isinstance(git_sha, str) or not GIT_SHA.fullmatch(git_sha):
+        raise ValueError("schema 3 source SHA or build id is invalid")
+    if build_id != f"wave-v{publication_version}-{git_sha[:12]}":
+        raise ValueError(f"schema 3 build id must be wave-v{publication_version}-{git_sha[:12]}")
+    if signing_team_id != WAVE_TEAM_ID:
+        raise ValueError(f"schema 3 requires Apple team ID {WAVE_TEAM_ID}")
+    if (
+        signing_identity_class != "Developer ID Application"
+        or not notarized
+        or not stapled
+        or set(notary_submissions or {}) != {"clap", "vst3"}
+        or any(
+            not isinstance(value, str) or not NOTARY_ID.fullmatch(value)
+            for value in (notary_submissions or {}).values()
+        )
+    ):
+        raise ValueError("schema 3 requires Developer ID signing and stapled notarization")
+    if not isinstance(build_id, str) or not SAFE_BUILD_ID.fullmatch(build_id):
+        raise ValueError("schema 3 source SHA or build id is invalid")
+
+    expected_clap = f"wave-v{publication_version}-macos.clap.zip"
+    expected_vst3 = f"wave-v{publication_version}-macos.vst3.zip"
+    expected_windows = f"wave-v{publication_version}-windows-x86_64-unsigned.vst3.zip"
+    for path, expected, label in (
+        (clap, expected_clap, "CLAP artifact"),
+        (vst3, expected_vst3, "VST3 artifact"),
+        (windows_vst3, expected_windows, "Windows VST3 artifact"),
+    ):
+        if path.name != expected or not SAFE_NAME.fullmatch(path.name):
+            raise ValueError(f"{label} must be named {expected}")
+
+    clap_hash, clap_size = _validated_file_digest(clap, "CLAP artifact")
+    vst3_hash, vst3_size = _validated_file_digest(vst3, "VST3 artifact")
+    windows_hash, windows_size = _validated_file_digest(windows_vst3, "Windows VST3 artifact")
+    screenshot_hash, screenshot_size = _validated_file_digest(screenshot, "WAVE screenshot")
+    screenshot_info = validate_png(screenshot)
+    if screenshot.name != "wave-default-960x600.png" or screenshot_info["width"] != 960 or screenshot_info["height"] != 600:
+        raise ValueError("WAVE schema 3 screenshot must be wave-default-960x600.png")
+    if screenshot_info["hash"] != screenshot_hash or screenshot_info["size"] != screenshot_size:
+        raise ValueError("WAVE screenshot hash or size changed during validation")
+    changelog_hash, changelog_size = _validated_file_digest(changelog, "CHANGELOG.md")
+    if changelog.name != "CHANGELOG.md":
+        raise ValueError("CHANGELOG.md is missing or invalid")
+    validate_release_fields(
+        publication_version,
+        released_at,
+        [clap.name, vst3.name, windows_vst3.name, screenshot.name, changelog.name],
+        [clap_hash, vst3_hash, windows_hash, screenshot_hash, changelog_hash],
+        [clap_size, vst3_size, windows_size, screenshot_size, changelog_size],
+    )
+
+    artifacts = [
+        {
+            "format": "clap",
+            "platform": "macos",
+            "architectures": ["arm64"],
+            "name": clap.name,
+            "media_type": "application/zip",
+            "sha256": clap_hash,
+            "size_bytes": clap_size,
+            "security": {
+                "status": "signed",
+                "certificate": "Developer ID Application",
+                "team_id": signing_team_id,
+                "notarized": True,
+                "stapled": True,
+                "notary_submission": (notary_submissions or {})["clap"],
+            },
+        },
+        {
+            "format": "vst3",
+            "platform": "macos",
+            "architectures": ["arm64"],
+            "name": vst3.name,
+            "media_type": "application/zip",
+            "sha256": vst3_hash,
+            "size_bytes": vst3_size,
+            "security": {
+                "status": "signed",
+                "certificate": "Developer ID Application",
+                "team_id": signing_team_id,
+                "notarized": True,
+                "stapled": True,
+                "notary_submission": (notary_submissions or {})["vst3"],
+            },
+        },
+        {
+            "format": "vst3",
+            "platform": "windows",
+            "architectures": ["x86_64"],
+            "name": windows_vst3.name,
+            "media_type": "application/zip",
+            "sha256": windows_hash,
+            "size_bytes": windows_size,
+            "security": {"status": "unsigned", "certificate": None},
+        },
+    ]
+    names = [artifact["name"] for artifact in artifacts] + [screenshot.name, changelog.name]
+    if len(names) != len(set(names)):
+        raise ValueError("release file names must be unique")
+    return {
+        "schema_version": MANIFEST_SCHEMA_V3,
+        "product": "wave",
+        "build_id": build_id,
+        "version": publication_version,
+        "channel": channel,
+        "released_at": released_at,
+        "source": {"repository": "PORTALSURFER/wave", "git_sha": git_sha, "dirty": False},
+        "distribution": "production",
+        "artifacts": artifacts,
+        "screenshot": {
+            "role": "default-ui",
+            "name": screenshot.name,
+            "media_type": "image/png",
+            "width": screenshot_info["width"],
+            "height": screenshot_info["height"],
+            "logical_width": screenshot_info["width"],
+            "logical_height": screenshot_info["height"],
+            "dpi_scale": screenshot_info["dpi"],
+            "source_git_sha": git_sha,
+            "sha256": screenshot_info["hash"],
+            "size_bytes": screenshot_info["size"],
+        },
+        "changelog": {
+            "name": changelog.name,
+            "format": "markdown",
+            "media_type": "text/markdown; charset=utf-8",
+            "sha256": changelog_hash,
+            "size_bytes": changelog_size,
+        },
+    }
+
+
 def _request(url: str, method: str, body: Optional[bytes], headers: dict[str, str]) -> tuple[int, bytes]:
     request = Request(url, method=method, data=body, headers=headers)
     try:
@@ -425,7 +573,7 @@ def _publish_validated_manifest(
     except json.JSONDecodeError as error:
         raise RuntimeError("capability response was not JSON") from error
     versions = capability.get("release_upload", {}).get("manifest_schema_versions", [])
-    if MANIFEST_SCHEMA not in versions:
+    if MANIFEST_SCHEMA_V2 not in versions:
         raise RuntimeError("server does not support release manifest schema 2; no files were uploaded")
 
     files: list[tuple[str, Path, str]] = []
@@ -496,8 +644,8 @@ def _validate_canonical_source(manifest: dict[str, Any], repo_root: Path) -> Non
         branch = _repo_output(("git", "symbolic-ref", "--quiet", "--short", "HEAD"), repo_root)
     except ValueError:
         branch = ""
-    if not branch:
-        raise ValueError("production publishing requires a non-detached checkout")
+    if branch != "main":
+        raise ValueError("production release source must be a non-detached main checkout")
     dirty_status = _run_checked(
         ("git", "status", "--porcelain", "--untracked-files=all"),
         cwd=repo_root,
@@ -583,12 +731,117 @@ def _audit_zip(path: Path, format_name: str, expected_team: str, *, cwd: Path, r
 
 
 def _validate_exact_manifest_names(manifest: dict[str, Any]) -> None:
-    expected = {"clap": f"wave-v{manifest['version']}-macos.clap.zip", "vst3": f"wave-v{manifest['version']}-macos.vst3.zip"}
-    actual = {artifact["format"]: artifact["name"] for artifact in manifest["artifacts"]}
+    if manifest.get("schema_version") == MANIFEST_SCHEMA_V3:
+        expected = {
+            ("macos", "arm64", "clap"): f"wave-v{manifest['version']}-macos.clap.zip",
+            ("macos", "arm64", "vst3"): f"wave-v{manifest['version']}-macos.vst3.zip",
+            ("windows", "x86_64", "vst3"): f"wave-v{manifest['version']}-windows-x86_64-unsigned.vst3.zip",
+        }
+        actual = {
+            (artifact["platform"], artifact["architectures"][0], artifact["format"]): artifact["name"]
+            for artifact in manifest["artifacts"]
+        }
+    else:
+        expected = {"clap": f"wave-v{manifest['version']}-macos.clap.zip", "vst3": f"wave-v{manifest['version']}-macos.vst3.zip"}
+        actual = {artifact["format"]: artifact["name"] for artifact in manifest["artifacts"]}
     if actual != expected:
         raise ValueError("manifest artifact names do not match the exact WAVE ZIP contract")
     if manifest["screenshot"]["role"] != "default-ui" or manifest["screenshot"]["name"] != "wave-default-960x600.png" or manifest["changelog"]["name"] != "CHANGELOG.md":
         raise ValueError("manifest support-file roles or names do not match the WAVE release contract")
+
+
+def _validate_schema3_file(root: Path, entry: dict[str, Any]) -> None:
+    name = entry.get("name")
+    digest = entry.get("sha256")
+    size = entry.get("size_bytes")
+    if not isinstance(name, str) or not SAFE_NAME.fullmatch(name) or not isinstance(digest, str) or not SHA256.fullmatch(digest) or not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+        raise ValueError("schema 3 file metadata is invalid")
+    path = root / name
+    _validate_regular_file(path, name)
+    actual_digest, actual_size = file_digest(path)
+    if actual_digest != digest or actual_size != size:
+        raise ValueError(f"manifest hash/size mismatch: {name}")
+
+
+def _validate_schema3_manifest(manifest: dict[str, Any], root: Path) -> None:
+    required = {"schema_version", "product", "build_id", "version", "channel", "released_at", "source", "distribution", "artifacts", "screenshot", "changelog"}
+    if set(manifest) != required or manifest.get("schema_version") != MANIFEST_SCHEMA_V3:
+        raise ValueError("schema 3 manifest fields are invalid")
+    source = manifest["source"]
+    if not isinstance(source, dict) or set(source) != {"repository", "git_sha", "dirty"} or source.get("repository") != "PORTALSURFER/wave" or source.get("dirty") is not False or not isinstance(source.get("git_sha"), str) or not GIT_SHA.fullmatch(source["git_sha"]):
+        raise ValueError("schema 3 source is invalid")
+    validate_channel_version(manifest.get("version"), manifest.get("channel"))
+    if manifest["product"] != "wave" or manifest["channel"] != "nightly" or manifest["distribution"] != "production":
+        raise ValueError("schema 3 is only available for production WAVE nightlies")
+    source_sha = source["git_sha"]
+    expected_build_id = f"wave-v{manifest['version']}-{source_sha[:12]}"
+    if manifest["build_id"] != expected_build_id:
+        raise ValueError(f"schema 3 build id must be {expected_build_id}")
+
+    artifacts = manifest["artifacts"]
+    if not isinstance(artifacts, list) or len(artifacts) != 3:
+        raise ValueError("schema 3 manifest must contain exactly three artifacts")
+    expected_targets = {
+        ("macos", "arm64", "clap"): f"wave-v{manifest['version']}-macos.clap.zip",
+        ("macos", "arm64", "vst3"): f"wave-v{manifest['version']}-macos.vst3.zip",
+        ("windows", "x86_64", "vst3"): f"wave-v{manifest['version']}-windows-x86_64-unsigned.vst3.zip",
+    }
+    seen_targets: set[tuple[str, str, str]] = set()
+    names: set[str] = set()
+    signing_team_id = ""
+    for artifact in artifacts:
+        if not isinstance(artifact, dict) or set(artifact) != {"format", "platform", "architectures", "name", "media_type", "sha256", "size_bytes", "security"}:
+            raise ValueError("schema 3 artifact metadata is invalid")
+        if artifact["media_type"] != "application/zip" or not isinstance(artifact["platform"], str) or not isinstance(artifact["format"], str) or not isinstance(artifact["architectures"], list) or len(artifact["architectures"]) != 1 or not isinstance(artifact["architectures"][0], str) or not isinstance(artifact["name"], str):
+            raise ValueError("schema 3 artifact metadata is invalid")
+        target = (artifact.get("platform"), artifact["architectures"][0], artifact.get("format"))
+        if target not in expected_targets or target in seen_targets or artifact["name"] != expected_targets[target] or artifact["name"] in names:
+            raise ValueError("schema 3 artifact identity is invalid")
+        security = artifact["security"]
+        if target[0] == "windows":
+            if security != {"status": "unsigned", "certificate": None}:
+                raise ValueError("schema 3 Windows artifact must be unsigned")
+        else:
+            if not isinstance(security, dict) or set(security) != {"status", "certificate", "team_id", "notarized", "stapled", "notary_submission"} or security["status"] != "signed" or security["certificate"] != "Developer ID Application" or security["team_id"] != WAVE_TEAM_ID or security["notarized"] is not True or security["stapled"] is not True or not isinstance(security["notary_submission"], str) or not NOTARY_ID.fullmatch(security["notary_submission"]):
+                raise ValueError("schema 3 macOS artifact security is invalid")
+            if signing_team_id and signing_team_id != security["team_id"]:
+                raise ValueError("schema 3 macOS signing teams must match")
+            signing_team_id = security["team_id"]
+        _validate_schema3_file(root, artifact)
+        seen_targets.add(target)
+        names.add(artifact["name"])
+    if seen_targets != set(expected_targets):
+        raise ValueError("schema 3 artifact targets are incomplete")
+
+    screenshot = manifest["screenshot"]
+    screenshot_fields = {"role", "name", "media_type", "width", "height", "logical_width", "logical_height", "dpi_scale", "source_git_sha", "sha256", "size_bytes"}
+    if not isinstance(screenshot, dict) or set(screenshot) != screenshot_fields or screenshot["role"] != "default-ui" or screenshot["name"] != "wave-default-960x600.png" or screenshot["media_type"] != "image/png" or screenshot["width"] != 960 or screenshot["height"] != 600 or screenshot["logical_width"] != 960 or screenshot["logical_height"] != 600 or screenshot["dpi_scale"] != 1.0 or screenshot["source_git_sha"] != source_sha or screenshot["name"] in names:
+        raise ValueError("schema 3 screenshot metadata is invalid")
+    _validate_schema3_file(root, screenshot)
+    screenshot_info = validate_png(root / screenshot["name"])
+    width, height = screenshot_info["width"], screenshot_info["height"]
+    if (width, height) != (screenshot["width"], screenshot["height"]):
+        raise ValueError("schema 3 screenshot dimensions do not match its manifest")
+    names.add(screenshot["name"])
+
+    changelog = manifest["changelog"]
+    if not isinstance(changelog, dict) or set(changelog) != {"name", "format", "media_type", "sha256", "size_bytes"} or changelog["name"] != "CHANGELOG.md" or changelog["name"] in names or changelog["format"] != "markdown" or changelog["media_type"] != "text/markdown; charset=utf-8":
+        raise ValueError("schema 3 changelog metadata is invalid")
+    _validate_schema3_file(root, changelog)
+    manifest_path = root / "release-manifest.json"
+    if manifest_path.is_file() and manifest_path.read_bytes() != canonical_json(manifest):
+        raise ValueError("release-manifest.json is not canonical JSON")
+
+
+def validate_manifest(manifest: dict[str, Any], root: Path) -> None:
+    if not isinstance(manifest, dict):
+        raise ValueError("manifest must be an object")
+    if manifest.get("schema_version") == MANIFEST_SCHEMA_V2:
+        validate_publish_manifest(manifest, root, require_production=manifest.get("distribution") == "production")
+    elif manifest.get("schema_version") == MANIFEST_SCHEMA_V3:
+        _validate_schema3_manifest(manifest, root)
+    else:
+        raise ValueError("manifest schema or fields are invalid")
 
 
 def publish_release(*, endpoint: str, token: str, manifest_path: Path, root: Optional[Path] = None, repo_root: Optional[Path] = None, package_version: Optional[str] = None) -> None:
@@ -609,6 +862,8 @@ def publish_release(*, endpoint: str, token: str, manifest_path: Path, root: Opt
         raise ValueError(f"could not load release manifest: {manifest_path}") from error
     if not isinstance(manifest, dict) or canonical_json(manifest) != manifest_bytes:
         raise ValueError("release manifest is not canonical JSON")
+    if manifest.get("schema_version") != MANIFEST_SCHEMA_V2:
+        raise ValueError("the Python publisher supports schema 2 manifests only")
     validate_publish_manifest(manifest, artifact_root, package_version=package_version)
     _validate_exact_manifest_names(manifest)
     _validate_canonical_source(manifest, source_root)
@@ -626,6 +881,13 @@ def publish_release(*, endpoint: str, token: str, manifest_path: Path, root: Opt
 
 
 def validate_publish_manifest(manifest: dict[str, Any], root: Path, *, require_production: bool = True, package_version: Optional[str] = None) -> None:
+    if manifest.get("schema_version") == MANIFEST_SCHEMA_V3:
+        if not require_production:
+            raise ValueError("schema 3 manifests are production-only")
+        _validate_schema3_manifest(manifest, root)
+        if package_version is not None:
+            validate_publication_version(package_version, manifest["version"], manifest["channel"])
+        return
     if manifest.get("schema_version") != MANIFEST_SCHEMA or manifest.get("product") != "wave":
         raise ValueError("publish requires WAVE manifest schema 2")
     build_id = manifest.get("build_id")
@@ -663,9 +925,11 @@ def validate_publish_manifest(manifest: dict[str, Any], root: Path, *, require_p
     for entry in entries:
         if not isinstance(entry, dict) or not isinstance(entry.get("name"), str) or not isinstance(entry.get("sha256"), str) or not isinstance(entry.get("size_bytes"), int):
             raise ValueError("publish manifest has invalid file metadata")
+    _validate_exact_manifest_names(manifest)
     validate_release_fields(manifest.get("version", ""), manifest.get("released_at", ""), [entry["name"] for entry in entries], [entry["sha256"] for entry in entries], [entry["size_bytes"] for entry in entries])
     for entry in entries:
         path = root / entry["name"]
+        _validate_regular_file(path, entry["name"])
         digest, size = file_digest(path)
         if digest != entry["sha256"] or size != entry["size_bytes"]:
             raise ValueError(f"on-disk bytes do not match manifest: {entry['name']}")
@@ -682,9 +946,13 @@ def validate_publish_manifest(manifest: dict[str, Any], root: Path, *, require_p
     changelog = manifest["changelog"]
     if changelog.get("format") != "markdown" or changelog.get("media_type") != "text/markdown; charset=utf-8":
         raise ValueError("publish changelog metadata does not match the release contract")
+    manifest_path = root / "release-manifest.json"
+    if manifest_path.exists() or manifest_path.is_symlink():
+        _validate_regular_file(manifest_path, "release manifest")
+        if manifest_path.read_bytes() != canonical_json(manifest):
+            raise ValueError("release-manifest.json is not canonical JSON")
 
 
 def validate_preflight_manifest(manifest: dict[str, Any], root: Path, *, package_version: Optional[str] = None) -> None:
     """Validate local preflight provenance and the same file/metadata contract as publish."""
     validate_publish_manifest(manifest, root, require_production=False, package_version=package_version)
-    _validate_exact_manifest_names(manifest)

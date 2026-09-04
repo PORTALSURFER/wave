@@ -250,7 +250,7 @@ impl Widget for WaveformWidget {
 
     fn handle_input(&mut self, bounds: Rect, input: WidgetInput) -> Option<WidgetOutput> {
         let message = match input {
-            WidgetInput::PointerMove { position } => {
+            WidgetInput::PointerMove { position, .. } => {
                 self.common.state.hovered = bounds.contains(position);
                 self.chart_hovered = Self::chart_rect(bounds).contains(position);
                 self.active_offset
@@ -258,7 +258,7 @@ impl Widget for WaveformWidget {
                         delta: Self::pointer_offset(bounds, position) - drag.start_pointer_x,
                     })
             }
-            WidgetInput::PointerModifiersChanged { modifiers } => {
+            WidgetInput::PointerModifiersChanged { modifiers, .. } => {
                 (self.command_held != modifiers.command || self.shift_held != modifiers.shift)
                     .then_some(EditorMessage::SetWaveformModifiers {
                         command_held: modifiers.command,
@@ -269,6 +269,7 @@ impl Widget for WaveformWidget {
                 position,
                 button: PointerButton::Primary,
                 modifiers,
+                ..
             } if Self::chart_rect(bounds).contains(position)
                 && modifiers.command
                 && modifiers.shift
@@ -284,6 +285,7 @@ impl Widget for WaveformWidget {
                 position,
                 button: PointerButton::Primary,
                 modifiers,
+                ..
             } if Self::chart_rect(bounds).contains(position)
                 && modifiers.command
                 && modifiers.shift
@@ -1503,7 +1505,7 @@ pub const fn preferred_window_size() -> (u32, u32) {
 mod tests {
     use super::*;
     use crate::capture::{EnvelopePoint, SnapshotMode};
-    use radiant::widgets::PointerModifiers;
+    use radiant::widgets::{KeyboardModifiers, PointerModifiers};
     use toybox::radiant_gui::RadiantEditor;
 
     fn test_editor() -> WaveEditor {
@@ -1988,6 +1990,7 @@ mod tests {
             position,
             button: PointerButton::Primary,
             modifiers,
+            timestamp: None,
         });
         assert_eq!(editor.runtime.bridge().state().waveform_offset, 0.0);
         let plan = editor.paint_plan().clone();
@@ -2269,9 +2272,18 @@ mod tests {
         for key in [WidgetKey::Enter, WidgetKey::Space] {
             assert_eq!(
                 button
-                    .handle_input(bounds, WidgetInput::KeyPress(key))
-                    .and_then(|output| output.typed_copied::<ButtonMessage>()),
-                Some(ButtonMessage::Activate)
+                    .handle_input(
+                        bounds,
+                        WidgetInput::KeyPress {
+                            key,
+                            modifiers: KeyboardModifiers::default(),
+                            repeat: false,
+                            timestamp: None,
+                        },
+                    )
+                    .and_then(|output| output.typed_copied::<ButtonMessage>())
+                    .map(ButtonMessage::is_activate),
+                Some(true)
             );
         }
 
@@ -2284,8 +2296,9 @@ mod tests {
         assert_eq!(
             pointer_button
                 .handle_input(bounds, WidgetInput::primary_release(Point::new(14.0, 14.0)))
-                .and_then(|output| output.typed_copied::<ButtonMessage>()),
-            Some(ButtonMessage::Activate)
+                .and_then(|output| output.typed_copied::<ButtonMessage>())
+                .map(ButtonMessage::is_activate),
+            Some(true)
         );
 
         let theme = ThemeTokens::dark();

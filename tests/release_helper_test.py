@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -42,10 +43,15 @@ class ReleaseHelperTests(unittest.TestCase):
     def test_wave_release_identifier_and_artifact_contract(self):
         root = Path(__file__).parents[1]
         workflow = (root / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        windows_workflow = (root / ".github" / "workflows" / "windows-release.yml").read_text(encoding="utf-8")
         release_script = (root / "scripts" / "release.sh").read_text(encoding="utf-8")
         helper = (root / "scripts" / "release_helper.py").read_text(encoding="utf-8")
+        build_script = (root / "build.rs").read_text(encoding="utf-8")
 
         self.assertIn("secrets.WAVE_RELEASE_UPLOAD_TOKEN", workflow)
+        self.assertIn("./.github/workflows/windows-release.yml", workflow)
+        self.assertIn("id-token: write", workflow)
+        self.assertIn("PORTALSURFER_PUBLISHER_COMMIT: 165776d6707ab6d9e8bb76b2a8866654140ca6bc", workflow)
         self.assertIn("https://portalsurfer.org/plugins/api/v1/products/wave/releases", workflow)
         self.assertIn("target/ui-screenshots/wave/initial-ui-default.png", release_script)
         self.assertIn('CFBundleName</key><string>WAVE</string>', release_script)
@@ -53,14 +59,23 @@ class ReleaseHelperTests(unittest.TestCase):
         self.assertIn('wave-v${publication_version}-macos.vst3.zip', release_script)
         self.assertIn('<key>CFBundleShortVersionString</key><string>${package_version}</string>', release_script)
         self.assertIn('<key>CFBundleVersion</key><string>${package_version}</string>', release_script)
-        self.assertIn('build_manifest(publication_version=', release_script)
+        self.assertIn('build_manifest(**kwargs', release_script)
         self.assertIn('if [[ -n "${requested_version}" && "${requested_version}" != "${package_version}" ]]', release_script)
         self.assertIn('publication_version="${requested_publication_version:-${package_version}}"', release_script)
         self.assertIn("wave-default-960x600.png", release_script)
         self.assertIn("wave-v{manifest['version']}-macos.clap.zip", helper)
         self.assertIn("wave-v{manifest['version']}-macos.vst3.zip", helper)
+        self.assertIn("wave-v{manifest['version']}-windows-x86_64-unsigned.vst3.zip", helper)
         self.assertIn('com.portalsurfer.wave.', helper)
         self.assertIn('"product": "wave"', helper)
+        self.assertIn("WindowsBundleFormat::Vst3", build_script)
+        self.assertIn("windows_bundle_paths", build_script)
+        self.assertIn('"WAVE"', build_script)
+        self.assertIn("windows_rustc_link_arg", build_script)
+        self.assertIn('cargo build --locked --release --target "${RUST_TARGET}" --features vst3', windows_workflow)
+        self.assertNotIn("id-token:", windows_workflow)
+        self.assertNotIn("secrets.", windows_workflow)
+        self.assertIn('WAVE_TEAM_ID = "DKTKQ8U5T8"', helper)
 
         release_files = [
             root / ".git-cliff.toml",
@@ -68,14 +83,18 @@ class ReleaseHelperTests(unittest.TestCase):
             root / ".github" / "workflows" / "nightly.yml",
             root / ".github" / "workflows" / "release-preflight.yml",
             root / ".github" / "workflows" / "release.yml",
+            root / ".github" / "workflows" / "windows-release.yml",
             root / "scripts" / "bump_version.py",
             root / "scripts" / "release.sh",
             root / "scripts" / "release_helper.py",
+            root / "scripts" / "windows_release_helper.py",
             root / "scripts" / "update_changelog.sh",
             root / "CHANGELOG.md",
             root / "README.md",
+            root / "docs" / "WINDOWS_RELEASE.md",
+            root / "tests" / "release_pipeline_integration.py",
         ]
-        forbidden_identifier = "pu" + "mp"
+        forbidden_identifier = "radiant_repo_token"
         for path in release_files:
             self.assertNotIn(forbidden_identifier, path.read_text(encoding="utf-8").lower(), path)
 
@@ -114,37 +133,6 @@ class ReleaseHelperTests(unittest.TestCase):
         self.assertEqual(release_helper.latest_release_source_sha(document, channel="nightly"), sha_b)
         self.assertIsNone(release_helper.latest_release_source_sha({"releases": []}, channel="nightly"))
         self.assertTrue(release_helper.should_release(source_sha=sha_a, document={"releases": []}))
-
-    def test_release_version_advances_globally_across_channels(self):
-        document = {
-            "releases": [
-                {"channel": "nightly", "version": "0.2.3", "released_at": "2026-07-29T20:00:00Z"},
-                {"channel": "stable", "version": "0.2.5", "released_at": "2026-07-30T20:00:00Z"},
-            ]
-        }
-        self.assertEqual(release_helper.latest_release_version(document), "0.2.5")
-        self.assertEqual(release_helper.next_release_version("0.2.0", document), "0.2.6")
-        self.assertEqual(release_helper.next_release_version("0.2.6", document), "0.2.6")
-
-    def test_release_version_history_extracts_legacy_and_qualified_cores(self):
-        document = {
-            "releases": [
-                {"channel": "nightly", "version": "0.2.3"},
-                {"channel": "nightly", "version": "0.2.4-nightly.91"},
-                {"channel": "rc", "version": "0.2.6-rc.7"},
-                {"channel": "stable", "version": "0.2.5"},
-            ]
-        }
-        self.assertEqual(release_helper.latest_release_version(document), "0.2.6")
-        self.assertEqual(release_helper.next_release_version("0.2.6", document), "0.2.7")
-        self.assertEqual(release_helper.next_release_version("0.2.7", document), "0.2.7")
-
-        with self.assertRaisesRegex(ValueError, "release version"):
-            release_helper.latest_release_version({"releases": [{"channel": "nightly", "version": "0.2.4-nightly.0"}]})
-
-    def test_release_version_rejects_malformed_history(self):
-        with self.assertRaisesRegex(ValueError, "release version"):
-            release_helper.latest_release_version({"releases": [{"channel": "nightly", "version": "0.2.x"}]})
 
     def test_publication_version_derivation_and_channel_validation(self):
         self.assertEqual(release_helper.derive_publication_version("0.1.19", "stable", 42), "0.1.19")
@@ -207,23 +195,44 @@ class ReleaseHelperTests(unittest.TestCase):
             self.assertIn('version = "0.2.1"', manifest.read_text(encoding="utf-8"))
             self.assertIn('version = "0.2.1"', lockfile.read_text(encoding="utf-8"))
 
-    def test_release_workflow_commits_version_before_build(self):
+    def test_release_workflow_keeps_checked_out_source_immutable(self):
         workflow = (Path(__file__).parents[1] / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
-        self.assertIn("contents: write", workflow)
+        preflight = (Path(__file__).parents[1] / ".github" / "workflows" / "release-preflight.yml").read_text(encoding="utf-8")
         self.assertIn("group: wave-release", workflow)
-        self.assertIn("release_helper.next_release_version", workflow)
-        self.assertIn("python3 scripts/bump_version.py", workflow)
-        self.assertIn("git push origin HEAD:main", workflow)
-        self.assertIn("name: wave-release-${{ inputs.channel }}-${{ steps.release_source.outputs.sha }}", workflow)
+        self.assertIn("permissions: {}", workflow)
+        self.assertIn("source_sha: ${{ steps.source_sha.outputs.sha }}", workflow)
+        for release_workflow in (workflow, preflight):
+            self.assertNotIn("release_version", release_workflow)
+            self.assertNotIn("next_release_version", release_workflow)
+            self.assertNotIn("python3 scripts/bump_version.py", release_workflow)
+            self.assertNotIn("git commit", release_workflow)
+            self.assertNotIn("git push", release_workflow)
+        self.assertGreaterEqual(workflow.count("persist-credentials: false"), 2)
+        self.assertEqual(workflow.count("contents: write"), 1)
+        self.assertIn("contents: write", workflow)
+        self.assertIn("gh release create", workflow)
+        self.assertIn("gh release edit", workflow)
+        self.assertIn("EXPECTED_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}", workflow)
+        macos_job = workflow.split("\n  macos_release:\n", 1)[1]
+        self.assertIn("contents: write", macos_job)
+        self.assertIn("PACKAGE_VERSION: ${{ needs.prepare.outputs.package_version }}", macos_job)
+        macos_checkout = macos_job.split("- name: Checkout exact main source", 1)[1].split("- name: Verify shared source identity", 1)[0]
+        self.assertIn("persist-credentials: false", macos_checkout)
+        self.assertNotIn("scripts/bump_version.py", macos_job)
+        self.assertNotIn("git commit", macos_job)
+        self.assertNotIn("git push", macos_job)
 
     def test_release_workflow_derives_and_passes_publication_version(self):
         workflow = (Path(__file__).parents[1] / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
-        self.assertIn("WORKFLOW_RUN_NUMBER: ${{ github.run_number }}", workflow)
-        self.assertIn("derive_publication_version(release_version, channel, os.environ.get(\"WORKFLOW_RUN_NUMBER\"))", workflow)
-        self.assertIn('output.write(f"publication_version={publication_version}\\n")', workflow)
-        self.assertIn("RELEASE_PUBLICATION_VERSION: ${{ steps.gate.outputs.publication_version }}", workflow)
-        self.assertIn('bash scripts/release.sh --publish --channel "${RELEASE_CHANNEL}" --publication-version "${RELEASE_PUBLICATION_VERSION}"', workflow)
-        self.assertIn('bash scripts/release.sh --package-only --channel "${RELEASE_CHANNEL}" --publication-version "${RELEASE_PUBLICATION_VERSION}"', workflow)
+        self.assertIn("WORKFLOW_SEQUENCE: ${{ github.run_number }}", workflow)
+        self.assertIn("derive_publication_version(package_version, channel, sequence)", workflow)
+        self.assertIn('echo "publication_version=${publication_version}"', workflow)
+        self.assertIn("RELEASE_PACKAGE_VERSION: ${{ needs.prepare.outputs.package_version }}", workflow)
+        self.assertIn("RELEASE_PUBLICATION_VERSION: ${{ needs.prepare.outputs.publication_version }}", workflow)
+        self.assertNotIn("next_release_version", workflow)
+        self.assertNotIn("release_version", workflow)
+        self.assertIn("release_args+=(--publish --publisher-script", workflow)
+        self.assertIn("release_args+=(--package-only)", workflow)
         self.assertLess(workflow.index("derive_publication_version"), workflow.index("RELEASE_PUBLICATION_VERSION"))
 
     def test_release_decision_preserves_requested_channel(self):
@@ -284,36 +293,85 @@ class ReleaseHelperTests(unittest.TestCase):
         self.assertLess(gate, install)
         self.assertNotIn("RADIANT_REPO_TOKEN", workflow)
         self.assertIn("RELEASES_URL: https://portalsurfer.org/plugins/api/v1/products/wave/releases", workflow)
-        self.assertIn("release_helper.should_release", workflow)
+        self.assertIn("from release_helper import should_release", workflow)
         self.assertIn("RELEASE_CHANNEL: ${{ inputs.channel }}", workflow)
         gate_block = workflow[gate:install]
-        self.assertIn("source_sha, releases_path, output_path, channel = sys.argv[1:]", gate_block)
+        self.assertIn("source_sha, releases_path, channel = sys.argv[1:]", gate_block)
         self.assertIn("channel=channel", gate_block)
         self.assertNotIn('channel="nightly"', gate_block)
-        self.assertIn("if: steps.gate.outputs.should_release == 'true'", workflow)
-        self.assertEqual(workflow.count("if: steps.gate.outputs.should_release == 'true'"), 6)
+        self.assertIn("needs.prepare.outputs.should_release == 'true'", workflow)
+        self.assertIn("needs.windows.result == 'success'", workflow)
+        self.assertIn("always()", workflow)
         self.assertIn("group: wave-release", workflow)
 
     def test_release_preflight_covers_workflow_and_helper_changes(self):
         workflow = (Path(__file__).parents[1] / ".github" / "workflows" / "release-preflight.yml").read_text(encoding="utf-8")
-        for path in (".github/workflows/release.yml", ".github/workflows/nightly.yml", "scripts/release_helper.py", "scripts/bump_version.py", "tests/release_helper_test.py"):
+        harness = (Path(__file__).parents[1] / "tests" / "release_pipeline_integration.py").read_text(encoding="utf-8")
+        for path in (".github/workflows/release.yml", ".github/workflows/windows-release.yml", ".github/workflows/nightly.yml", "scripts/release_helper.py", "scripts/windows_release_helper.py", "tests/release_helper_test.py", "tests/windows_release_helper_test.py"):
             self.assertIn(path, workflow)
+        self.assertNotIn("      - scripts/bump_version.py", workflow)
         self.assertIn("python3 tests/release_helper_test.py", workflow)
+        self.assertIn("prepare:", workflow)
+        self.assertIn("windows_integration:", workflow)
+        self.assertIn("uses: ./.github/workflows/windows-release.yml", workflow)
+        self.assertIn("artifact_contract:", workflow)
+        self.assertIn("tests/release_pipeline_integration.py", workflow)
+        self.assertIn("needs: [prepare, preflight, windows_integration]", workflow)
+        for action in re.findall(r"(?m)^\s+uses:\s+([^\s#]+)", workflow):
+            if not action.startswith("./"):
+                self.assertRegex(action, r"@[0-9a-f]{40}\Z", action)
+        producer_lane, publisher_lane = workflow.split("\n  publisher_integration:\n", 1)
+        self.assertIn("if: github.event_name == 'push' && github.ref == 'refs/heads/main'", publisher_lane)
+        self.assertIn("needs: [prepare, preflight, windows_integration, artifact_contract]", publisher_lane)
+        self.assertIn("environment: publisher-integration", publisher_lane)
+        self.assertIn("permissions:\n      contents: read", publisher_lane)
+        self.assertIn("actions/create-github-app-token@7e473efe3cb98aa54f8d4bac15400b15fad77d94", publisher_lane)
+        self.assertIn("app-id: ${{ vars.PORTALSURFER_PUBLISHER_APP_ID }}", publisher_lane)
+        self.assertIn("private-key: ${{ secrets.PORTALSURFER_PUBLISHER_PRIVATE_KEY }}", publisher_lane)
+        self.assertIn("owner: PORTALSURFER", publisher_lane)
+        self.assertIn("repositories: portalsurfer.org", publisher_lane)
+        self.assertIn("permission-contents: read", publisher_lane)
+        self.assertIn("repository: PORTALSURFER/portalsurfer.org", publisher_lane)
+        self.assertIn("ref: 165776d6707ab6d9e8bb76b2a8866654140ca6bc", publisher_lane)
+        self.assertIn("token: ${{ steps.publisher_token.outputs.token }}", publisher_lane)
+        self.assertIn("persist-credentials: false", publisher_lane)
+        self.assertIn("--mode publisher-integration", publisher_lane)
+        for forbidden in ("APPLE_", "PORTALSURFER_RELEASE_TOKEN", "id-token:", "contents: write", "actions: write", "environment: production"):
+            self.assertNotIn(forbidden, publisher_lane)
+        for forbidden in ("PORTALSURFER/portalsurfer.org", "PUBLISHER_COMMIT", "secrets.", "environment:", "contents: write", "actions: write", "id-token:"):
+            self.assertNotIn(forbidden, producer_lane)
+        for contract in (
+            'choices=("artifact-contract", "publisher-integration")',
+            'PUBLISHER_COMMIT = "165776d6707ab6d9e8bb76b2a8866654140ca6bc"',
+            "run_artifact_contract(args)",
+            "run_publisher_integration(args)",
+            "_require_combined_scratch(",
+            "windows_release_helper.validate_manifest(",
+            "release_helper.build_manifest(",
+            "release_helper.canonical_json(",
+            "ACTIONS_ID_TOKEN_REQUEST_URL",
+            '"127.0.0.1"',
+            "TEST_ATTESTATION_TOKEN",
+            "api_mock.commit_count == 1",
+        ):
+            self.assertIn(contract, harness)
 
     def test_release_workflow_artifact_uses_released_source_sha(self):
         workflow = (Path(__file__).parents[1] / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
         checkout = workflow.index("- name: Checkout exact main source")
-        capture = workflow.index("- name: Capture checked-out source SHA")
-        release_capture = workflow.index("- name: Capture release source SHA")
+        verify = workflow.index("- name: Verify shared source identity")
         upload = workflow.index("- name: Upload immutable bundle for inspection")
-        self.assertLess(checkout, capture)
-        self.assertLess(capture, release_capture)
-        self.assertLess(capture, upload)
-        capture_block = workflow[capture:release_capture]
-        self.assertIn("id: source_sha", capture_block)
-        self.assertIn('git rev-parse HEAD', capture_block)
+        self.assertLess(checkout, verify)
+        self.assertLess(verify, upload)
+        verify_block = workflow[verify:upload]
+        self.assertIn("EXPECTED_GITHUB_SHA: ${{ github.sha }}", verify_block)
+        self.assertIn("EXPECTED_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}", verify_block)
+        self.assertIn('git rev-parse HEAD', verify_block)
+        self.assertIn('git symbolic-ref --quiet --short HEAD', verify_block)
+        self.assertIn('git status --porcelain --untracked-files=all', verify_block)
         upload_block = workflow[upload:]
-        self.assertIn("name: wave-release-${{ inputs.channel }}-${{ steps.release_source.outputs.sha }}", upload_block)
+        self.assertIn("name: wave-release-${{ inputs.channel }}-${{ needs.prepare.outputs.source_sha }}", upload_block)
+        self.assertNotIn("release_source", upload_block)
         self.assertNotIn("${{ github.sha }}", upload_block)
 
     def test_manifest_and_png_contract(self):
@@ -321,7 +379,7 @@ class ReleaseHelperTests(unittest.TestCase):
             root = Path(directory)
             screenshot = root / "wave-default-960x600.png"
             screenshot.write_bytes(png())
-            clap, vst3, changelog = (root / name for name in ("clap.zip", "vst3.zip", "CHANGELOG.md"))
+            clap, vst3, changelog = (root / name for name in ("wave-v0.2.0-macos.clap.zip", "wave-v0.2.0-macos.vst3.zip", "CHANGELOG.md"))
             clap.write_bytes(b"clap")
             vst3.write_bytes(b"vst3")
             changelog.write_text("# Release\n", encoding="utf-8")
@@ -330,6 +388,18 @@ class ReleaseHelperTests(unittest.TestCase):
             self.assertEqual(manifest["source"]["dirty"], False)
             self.assertEqual((manifest["screenshot"]["logical_width"], manifest["screenshot"]["logical_height"]), (960, 600))
             self.assertEqual(json.loads(release_helper.canonical_json(manifest)), manifest)
+            release_helper.validate_manifest(manifest, root)
+
+            manifest["artifacts"][0]["name"] = "wave-v0.2.0-macos.wrong.zip"
+            with self.assertRaisesRegex(ValueError, "exact WAVE ZIP contract"):
+                release_helper.validate_manifest(manifest, root)
+
+            manifest["artifacts"][0]["name"] = clap.name
+            clap_target = root / "real-clap.zip"
+            clap.rename(clap_target)
+            clap.symlink_to(clap_target.name)
+            with self.assertRaisesRegex(ValueError, "regular file"):
+                release_helper.validate_manifest(manifest, root)
 
     def test_channel_manifest_uses_publication_identity_and_numeric_bundle_version(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -368,7 +438,104 @@ class ReleaseHelperTests(unittest.TestCase):
             )
             self.assertNotIn("package_version", manifest)
 
-    def test_publish_rejects_legacy_numeric_nightly_before_transport(self):
+            wrong_name = root / "wave-v0.2.0-nightly.42-macos.wrong.zip"
+            wrong_name.write_bytes(clap.read_bytes())
+            manifest["artifacts"][0]["name"] = wrong_name.name
+            with self.assertRaisesRegex(ValueError, "exact WAVE ZIP contract"):
+                release_helper.validate_preflight_manifest(manifest, root, package_version="0.2.0")
+
+            manifest["artifacts"][0]["name"] = clap.name
+            wrong_name.unlink()
+            clap_target = root / "real-clap.zip"
+            clap.rename(clap_target)
+            clap.symlink_to(clap_target.name)
+            with self.assertRaisesRegex(ValueError, "regular file"):
+                release_helper.validate_preflight_manifest(manifest, root, package_version="0.2.0")
+
+    def test_nightly_schema3_combines_macos_and_unsigned_windows_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            publication_version = "0.2.0-nightly.42"
+            source_sha = "a" * 40
+            screenshot = root / "wave-default-960x600.png"
+            screenshot.write_bytes(png())
+            clap = root / f"wave-v{publication_version}-macos.clap.zip"
+            vst3 = root / f"wave-v{publication_version}-macos.vst3.zip"
+            windows = root / f"wave-v{publication_version}-windows-x86_64-unsigned.vst3.zip"
+            changelog = root / "CHANGELOG.md"
+            clap.write_bytes(b"clap")
+            vst3.write_bytes(b"vst3")
+            windows.write_bytes(b"windows")
+            changelog.write_text("# Release\n", encoding="utf-8")
+            manifest = release_helper.build_manifest(
+                publication_version=publication_version,
+                package_version="0.2.0",
+                build_id=f"wave-v{publication_version}-{source_sha[:12]}",
+                channel="nightly",
+                released_at="2026-07-29T00:00:00Z",
+                git_sha=source_sha,
+                clap=clap,
+                vst3=vst3,
+                screenshot=screenshot,
+                changelog=changelog,
+                distribution="production",
+                signing_identity_class="Developer ID Application",
+                notarized=True,
+                stapled=True,
+                signing_team_id=release_helper.WAVE_TEAM_ID,
+                notary_submissions={"clap": "12345678-1234-4123-8123-123456789abc", "vst3": "abcdefab-cdef-4abc-8def-abcdefabcdef"},
+                windows_vst3=windows,
+            )
+            (root / "release-manifest.json").write_bytes(release_helper.canonical_json(manifest))
+            release_helper.validate_manifest(manifest, root)
+            self.assertEqual(manifest["schema_version"], 3)
+            self.assertEqual(
+                [(artifact["platform"], artifact["format"]) for artifact in manifest["artifacts"]],
+                [("macos", "clap"), ("macos", "vst3"), ("windows", "vst3")],
+            )
+            self.assertEqual(manifest["artifacts"][2]["security"], {"status": "unsigned", "certificate": None})
+            self.assertEqual(manifest["screenshot"]["source_git_sha"], source_sha)
+            manifest["artifacts"][0]["security"]["team_id"] = "TEAM123456"
+            with self.assertRaisesRegex(ValueError, "schema 3 macOS artifact security"):
+                release_helper.validate_manifest(manifest, root)
+            manifest["artifacts"][0]["security"]["team_id"] = release_helper.WAVE_TEAM_ID
+            manifest["source"]["git_sha"] = None
+            with self.assertRaisesRegex(ValueError, "schema 3 source is invalid"):
+                release_helper.validate_manifest(manifest, root)
+
+    def test_schema3_rejects_signed_windows_security_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            publication_version = "0.2.0-nightly.42"
+            screenshot = root / "wave-default-960x600.png"
+            screenshot.write_bytes(png())
+            paths = [root / f"wave-v{publication_version}-macos.{extension}.zip" for extension in ("clap", "vst3")]
+            windows = root / f"wave-v{publication_version}-windows-x86_64-unsigned.vst3.zip"
+            for path in [*paths, windows]:
+                path.write_bytes(path.name.encode())
+            changelog = root / "CHANGELOG.md"
+            changelog.write_text("release\n", encoding="utf-8")
+            manifest = release_helper.build_manifest(
+                publication_version=publication_version,
+                package_version="0.2.0",
+                build_id=f"wave-v{publication_version}-{'a' * 12}",
+                channel="nightly",
+                released_at="2026-07-29T00:00:00Z",
+                git_sha="a" * 40,
+                clap=paths[0],
+                vst3=paths[1],
+                screenshot=screenshot,
+                changelog=changelog,
+                distribution="production",
+                signing_team_id=release_helper.WAVE_TEAM_ID,
+                notary_submissions={"clap": "12345678-1234-4123-8123-123456789abc", "vst3": "abcdefab-cdef-4abc-8def-abcdefabcdef"},
+                windows_vst3=windows,
+            )
+            manifest["artifacts"][2]["security"] = {"status": "signed", "certificate": "Developer ID Application"}
+            with self.assertRaisesRegex(ValueError, "Windows artifact must be unsigned"):
+                release_helper.validate_manifest(manifest, root)
+
+    def test_production_nightly_requires_the_combined_schema3_artifact_set(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             publication_version = "0.1.19-nightly.123"
@@ -380,38 +547,25 @@ class ReleaseHelperTests(unittest.TestCase):
             clap.write_bytes(b"clap")
             vst3.write_bytes(b"vst3")
             changelog.write_text("release\n", encoding="utf-8")
-            manifest = release_helper.build_manifest(
-                publication_version=publication_version,
-                package_version="0.1.19",
-                build_id=f"wave-v{publication_version}-abcdef012345",
-                channel="nightly",
-                released_at="2026-07-29T00:00:00Z",
-                git_sha="a" * 40,
-                clap=clap,
-                vst3=vst3,
-                screenshot=screenshot,
-                changelog=changelog,
-                distribution="production",
-                signing_identity_class="Developer ID Application",
-                notarized=True,
-                stapled=True,
-                signing_team_id="TEAM123456",
-                notary_submissions={"clap": "12345678-1234-4123-8123-123456789abc", "vst3": "abcdefab-cdef-4abc-8def-abcdefabcdef"},
-            )
-            manifest["version"] = "0.1.19"
-            manifest_path = root / "release-manifest.json"
-            manifest_path.write_bytes(release_helper.canonical_json(manifest))
-            requests = []
-            with self.assertRaisesRegex(ValueError, "nightly release version syntax"), mock.patch.object(release_helper, "_request", side_effect=lambda *args: requests.append(args)):
-                release_helper.publish_release(
-                    endpoint=release_helper.PRODUCTION_ORIGIN,
-                    token="secret",
-                    manifest_path=manifest_path,
-                    root=root,
-                    repo_root=root,
+            with self.assertRaisesRegex(ValueError, "Windows artifact"):
+                release_helper.build_manifest(
+                    publication_version=publication_version,
                     package_version="0.1.19",
+                    build_id=f"wave-v{publication_version}-abcdef012345",
+                    channel="nightly",
+                    released_at="2026-07-29T00:00:00Z",
+                    git_sha="a" * 40,
+                    clap=clap,
+                    vst3=vst3,
+                    screenshot=screenshot,
+                    changelog=changelog,
+                    distribution="production",
+                    signing_identity_class="Developer ID Application",
+                    notarized=True,
+                    stapled=True,
+                    signing_team_id="TEAM123456",
+                    notary_submissions={"clap": "12345678-1234-4123-8123-123456789abc", "vst3": "abcdefab-cdef-4abc-8def-abcdefabcdef"},
                 )
-            self.assertEqual(requests, [])
 
     def test_preflight_manifest_uses_ad_hoc_non_notarized_provenance(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -560,24 +714,20 @@ class ReleaseHelperTests(unittest.TestCase):
         self.assertLess(script.index(restore), script.index('security delete-keychain'))
 
     def test_release_notarization_checks_cover_live_and_extracted_bundles(self):
-        script = (Path(__file__).parents[1] / "scripts" / "release.sh").read_text(encoding="utf-8")
-        check = 'codesign -vvvv -R=notarized --check-notarization'
-        self.assertEqual(script.count(check), 2)
+        script = (Path(__file__).parents[1] / "scripts" / "release_helper.py").read_text(encoding="utf-8")
+        check = '"codesign", "-vvvv", "-R=notarized", "--check-notarization"'
+        self.assertEqual(script.count(check), 1)
         self.assertNotIn("spctl", script)
-        live = script.index(check)
-        extracted = script.index(check, live + 1)
-        self.assertLess(script.index('xcrun stapler validate "${bundle_dir}"'), live)
-        self.assertLess(script.index('xcrun stapler validate "${bundle}"'), extracted)
-        self.assertLess(live, script.index('local team_id', live))
-        self.assertLess(extracted, script.index('codesign_details=', extracted))
+        self.assertIn('xcrun", "stapler", "validate"', script)
+        self.assertIn('"codesign", "-dv", "--verbose=4"', script)
 
     def test_publish_rejects_tampered_final_zip_before_transport(self):
         transport = FakeTransport()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            screenshot = root / "shot.png"; screenshot.write_bytes(png())
-            clap = root / "a.zip"; clap.write_bytes(b"clap")
-            vst3 = root / "b.zip"; vst3.write_bytes(b"vst3")
+            screenshot = root / "wave-default-960x600.png"; screenshot.write_bytes(png())
+            clap = root / "wave-v0.2.0-macos.clap.zip"; clap.write_bytes(b"clap")
+            vst3 = root / "wave-v0.2.0-macos.vst3.zip"; vst3.write_bytes(b"vst3")
             changelog = root / "CHANGELOG.md"; changelog.write_text("release\n", encoding="utf-8")
             manifest = release_helper.build_manifest(version="0.2.0", build_id="wave-v0.2.0-test", channel="stable", released_at="2026-07-28T00:00:00Z", git_sha="a" * 40, clap=clap, vst3=vst3, screenshot=screenshot, changelog=changelog, distribution="production", signing_identity_class="Developer ID Application", notarized=True, stapled=True, signing_team_id="TEAM123456", notary_submissions={"clap": "12345678-1234-4123-8123-123456789abc", "vst3": "abcdefab-cdef-4abc-8def-abcdefabcdef"})
             clap.write_bytes(b"tampered")

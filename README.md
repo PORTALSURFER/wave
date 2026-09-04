@@ -1,6 +1,6 @@
 # WAVE
 
-WAVE is a small macOS Toybox/Radiant audio effect for inspecting kicks and
+WAVE is a small Toybox/Radiant audio effect for inspecting kicks and
 other transients while listening in a DAW. It passes stereo audio through
 unchanged and displays the latest completed selected beat-window waveform when the host
 provides tempo, musical position, and playback state.
@@ -41,10 +41,11 @@ configured, run:
 bash scripts/release.sh --package-only --channel stable
 ```
 
-Production releases select the next unused global patch version across stable,
-RC, and nightly channels, commit that version to `main`, and build from the
-resulting exact source commit. Nightlies use the same serialized release path,
-so a published nightly also advances the patch version.
+Stable, RC, and nightly releases publish the package version from the exact
+checked-out source together with the channel-specific publication syntax. The
+release workflows never bump `Cargo.toml`, commit, or push `main`; stable keeps
+the numeric package version, while RC and nightly add their validated
+`-rc.<workflow-sequence>` or `-nightly.<workflow-sequence>` suffix.
 
 The Cargo/package and installed bundle versions stay numeric. Stable publication
 uses that same numeric version; RC and nightly publication identities add the
@@ -52,12 +53,16 @@ validated `-rc.N` or `-nightly.N` suffix. The Actions workflow derives `N` from
 its unique run number. For a local non-stable release, pass the identity
 explicitly with `--publication-version`.
 
-This creates `dist/releases/wave-v<publication-version>-<12-char HEAD>/` containing
-the host-installable `wave-v<publication-version>-macos.clap.zip` and
-`wave-v<publication-version>-macos.vst3.zip` bundles, `wave-default-960x600.png`,
-`CHANGELOG.md`, and a schema 2 `release-manifest.json`. Add `--publish` and set
-`PORTALSURFER_RELEASE_TOKEN` in the environment to capability-check and publish
-the immutable bundle through
+Stable and RC builds create `dist/releases/wave-v<publication-version>-<12-char
+HEAD>/` containing the two macOS bundles, `wave-default-960x600.png`,
+`CHANGELOG.md`, and a schema 2 `release-manifest.json`. A production nightly
+also includes the host-installable
+`wave-v<publication-version>-windows-x86_64-unsigned.vst3.zip` and emits a
+schema 3 manifest combining all three platform artifacts. The Windows sidecar
+is validated during final assembly and is not published as a public download.
+
+Add `--publish` and set `PORTALSURFER_RELEASE_TOKEN` in the environment to
+capability-check and publish the immutable bundle through
 `https://portalsurfer.org/plugins/api/v1/products/wave/releases`. The token is
 never accepted as a command-line argument.
 
@@ -66,11 +71,15 @@ and verifies notarization on both bundles. The Actions workflow requires the
 Apple signing/notary secrets and `WAVE_RELEASE_UPLOAD_TOKEN` for publish
 runs.
 
-Production artifacts are macOS arm64, hardened-runtime Developer ID signed,
+Production macOS artifacts are arm64, hardened-runtime Developer ID signed,
 notarized, stapled, and checked with
 `codesign -vvvv -R=notarized --check-notarization`. The release producer
 re-audits the final ZIP bytes, bundle metadata, signatures, architecture,
 exports, and manifest hashes before the staged upload is atomically committed.
+Windows nightlies are x86_64 PE32+ VST3 bundles and remain explicitly unsigned;
+the Windows job receives no Apple, PortalSurfer, or OIDC publishing credential.
+See [docs/WINDOWS_RELEASE.md](docs/WINDOWS_RELEASE.md) for the sidecar and
+reusable-workflow contract.
 
 ## V1 behavior
 

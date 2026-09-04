@@ -6,7 +6,7 @@ use std::ptr;
 use toybox::vst3::prelude::Steinberg::*;
 use toybox::vst3::prelude::*;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use super::gui_adapter::WaveVst3GuiAdapter;
 use super::shared_state::WaveVst3Shared;
 
@@ -111,13 +111,13 @@ impl IEditControllerTrait for WaveVst3Controller {
     }
 
     unsafe fn createView(&self, name: FIDString) -> *mut IPlugView {
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let _ = name;
             ptr::null_mut()
         }
 
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             if name.is_null() {
                 return ptr::null_mut();
