@@ -1,0 +1,242 @@
+name: WAVE Windows release
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Nightly release channel for standalone Windows inspection
+        required: true
+        default: nightly
+        type: choice
+        options: [nightly]
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Shared main source SHA from the prepare job
+        required: true
+        type: string
+      package_version:
+        description: Shared package version from the prepare job
+        required: true
+        type: string
+      publication_version:
+        description: Shared publication version from the prepare job
+        required: true
+        type: string
+      channel:
+        description: Shared release channel from the prepare job
+        required: true
+        type: string
+      build_id:
+        description: Shared release build ID from the prepare job
+        required: true
+        type: string
+      released_at:
+        description: Shared release timestamp from the prepare job
+        required: true
+        type: string
+
+# github.event_name is the caller event for a called reusable workflow. The
+# required workflow_call-only source_sha input is the mode discriminator.
+permissions:
+  contents: read
+
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  PYTHONDONTWRITEBYTECODE: "1"
+  WINDOWS_RUNNER_IMAGE: windows-2022
+  RUST_TOOLCHAIN: 1.97.1
+  RUST_TARGET: x86_64-pc-windows-msvc
+  VST3_SDK_REPOSITORY: https://github.com/steinbergmedia/vst3sdk.git
+  VST3_SDK_REVISION: 58f8da7936800732561402d7936584ca4505de07
+
+concurrency:
+  group: wave-windows-release-${{ inputs.build_id || inputs.channel || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.source_sha != '' && inputs.source_sha || 'main' }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Capture checked-out source SHA
+        id: source_sha
+        env:
+          CALLED_MODE: ${{ inputs.source_sha != '' }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.source_sha || '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_sha="$(git rev-parse HEAD)"
+          [[ "${source_sha}" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "${CALLED_MODE}" == true ]]; then test "${source_sha}" = "${EXPECTED_SOURCE_SHA}"; fi
+          echo "sha=${source_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Compute publication version and build identity
+        id: metadata
+        env:
+          CALLED_MODE: ${{ inputs.source_sha != '' }}
+          RELEASE_CHANNEL_INPUT: ${{ inputs.channel || '' }}
+          SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}
+          PACKAGE_VERSION_INPUT: ${{ inputs.package_version || '' }}
+          PUBLICATION_VERSION_INPUT: ${{ inputs.publication_version || '' }}
+          BUILD_ID_INPUT: ${{ inputs.build_id || '' }}
+          RELEASED_AT_INPUT: ${{ inputs.released_at || '' }}
+          WORKFLOW_SEQUENCE: ${{ github.run_number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${RELEASE_CHANNEL_INPUT}" = nightly
+          if [[ "${CALLED_MODE}" == true ]]; then
+            package_version="${PACKAGE_VERSION_INPUT:?workflow_call package version is missing}"
+            publication_version="${PUBLICATION_VERSION_INPUT:?workflow_call publication version is missing}"
+            build_id="${BUILD_ID_INPUT:?workflow_call build id is missing}"
+            released_at="${RELEASED_AT_INPUT:?workflow_call released_at is missing}"
+            source_package_version="$(sed -n '/^\[package\]/,/^\[/ { s/^version[[:space:]]*=[[:space:]]*"\([^\"]*\)".*/\1/p; }' Cargo.toml | head -n 1)"
+            test "${source_package_version}" = "${package_version}"
+            test "${build_id}" = "wave-v${publication_version}-${SOURCE_SHA:0:12}"
+          else
+            package_version="$(sed -n '/^\[package\]/,/^\[/ { s/^version[[:space:]]*=[[:space:]]*"\([^\"]*\)".*/\1/p; }' Cargo.toml | head -n 1)"
+            test -n "${package_version}"
+            publication_version="$(PYTHONPATH=scripts python - "${package_version}" "${RELEASE_CHANNEL_INPUT}" "${WORKFLOW_SEQUENCE}" <<'PY'
+          import sys
+          from release_helper import derive_publication_version
+          print(derive_publication_version(sys.argv[1], sys.argv[2], sys.argv[3]))
+          PY
+            )"
+            build_id="wave-v${publication_version}-windows-x86_64-${SOURCE_SHA:0:12}"
+            released_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          fi
+          {
+            echo "package_version=${package_version}"
+            echo "publication_version=${publication_version}"
+            echo "build_id=${build_id}"
+            echo "released_at=${released_at}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          target: ${{ env.RUST_TARGET }}
+
+      - name: Capture build environment provenance
+        id: build_environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          runner_image_os="${ImageOS:?GitHub runner ImageOS is unavailable}"
+          runner_image_version="${ImageVersion:?GitHub runner ImageVersion is unavailable}"
+          test "${runner_image_os}" = win22
+          [[ "${runner_image_version}" =~ ^[0-9]{8}\.[0-9]+\.[0-9]+$ ]]
+          rustc_version="$(rustc --version)"
+          test "$(printf '%s\n' "${rustc_version}" | sed -n 's/^rustc \([^ ]*\).*/\1/p')" = "${RUST_TOOLCHAIN}"
+          test "$(rustc -vV | sed -n 's/^host: //p')" = "${RUST_TARGET}"
+          python_implementation="$(python -c 'import platform; print(platform.python_implementation())')"
+          python_version="$(python -c 'import platform; print(platform.python_version())')"
+          test "${python_implementation}" = CPython
+          {
+            echo "runner_image=${WINDOWS_RUNNER_IMAGE}"
+            echo "runner_image_os=${runner_image_os}"
+            echo "runner_image_version=${runner_image_version}"
+            echo "rust_toolchain=${RUST_TOOLCHAIN}"
+            echo "rust_target=${RUST_TARGET}"
+            echo "rustc_version=${rustc_version}"
+            echo "python_implementation=${python_implementation}"
+            echo "python_version=${python_version}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout pinned VST3 SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk_dir_unix="${RUNNER_TEMP}/vst3sdk"
+          sdk_dir_windows="$(cygpath -w "${sdk_dir_unix}")"
+          git clone "${VST3_SDK_REPOSITORY}" "${sdk_dir_unix}"
+          git -C "${sdk_dir_unix}" fetch --depth 1 origin "${VST3_SDK_REVISION}"
+          git -C "${sdk_dir_unix}" checkout --detach "${VST3_SDK_REVISION}"
+          test "$(git -C "${sdk_dir_unix}" rev-parse HEAD)" = "${VST3_SDK_REVISION}"
+          test -d "${sdk_dir_unix}/pluginterfaces"
+          echo "VST3_SDK_DIR=${sdk_dir_windows}" >> "$GITHUB_ENV"
+
+      - name: Build x86_64 Windows VST3 bundle
+        env:
+          PACKAGE_VERSION: ${{ steps.metadata.outputs.package_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_binary="dist/WAVE-v${PACKAGE_VERSION}.vst3/Contents/x86_64-win/WAVE-v${PACKAGE_VERSION}.vst3"
+          rm -rf -- "dist/WAVE-v${PACKAGE_VERSION}.vst3"
+          cargo build --locked --release --target "${RUST_TARGET}" --features vst3
+          test -f "${source_binary}"
+
+      - name: Package and validate unsigned Windows artifact
+        env:
+          BUILD_ID: ${{ steps.metadata.outputs.build_id }}
+          CHANNEL: ${{ inputs.channel }}
+          PACKAGE_VERSION: ${{ steps.metadata.outputs.package_version }}
+          PUBLICATION_VERSION: ${{ steps.metadata.outputs.publication_version }}
+          RELEASED_AT: ${{ steps.metadata.outputs.released_at }}
+          SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}
+          RUNNER_IMAGE: ${{ steps.build_environment.outputs.runner_image }}
+          RUNNER_IMAGE_OS: ${{ steps.build_environment.outputs.runner_image_os }}
+          RUNNER_IMAGE_VERSION: ${{ steps.build_environment.outputs.runner_image_version }}
+          BUILD_RUST_TOOLCHAIN: ${{ steps.build_environment.outputs.rust_toolchain }}
+          BUILD_RUST_TARGET: ${{ steps.build_environment.outputs.rust_target }}
+          BUILD_RUSTC_VERSION: ${{ steps.build_environment.outputs.rustc_version }}
+          BUILD_PYTHON_IMPLEMENTATION: ${{ steps.build_environment.outputs.python_implementation }}
+          BUILD_PYTHON_VERSION: ${{ steps.build_environment.outputs.python_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          output_dir="dist/releases/${BUILD_ID}"
+          source_binary="dist/WAVE-v${PACKAGE_VERSION}.vst3/Contents/x86_64-win/WAVE-v${PACKAGE_VERSION}.vst3"
+          python scripts/windows_release_helper.py package \
+            --binary "${source_binary}" \
+            --output-dir "${output_dir}" \
+            --package-version "${PACKAGE_VERSION}" \
+            --publication-version "${PUBLICATION_VERSION}" \
+            --channel "${CHANNEL}" \
+            --build-id "${BUILD_ID}" \
+            --released-at "${RELEASED_AT}" \
+            --source-sha "${SOURCE_SHA}" \
+            --cargo-lock Cargo.lock \
+            --vst3-sdk-revision "${VST3_SDK_REVISION}" \
+            --runner-image "${RUNNER_IMAGE}" \
+            --runner-image-os "${RUNNER_IMAGE_OS}" \
+            --runner-image-version "${RUNNER_IMAGE_VERSION}" \
+            --rust-toolchain "${BUILD_RUST_TOOLCHAIN}" \
+            --rust-target "${BUILD_RUST_TARGET}" \
+            --rustc-version "${BUILD_RUSTC_VERSION}" \
+            --python-implementation "${BUILD_PYTHON_IMPLEMENTATION}" \
+            --python-version "${BUILD_PYTHON_VERSION}"
+          python scripts/windows_release_helper.py validate --root "${output_dir}" --cargo-lock Cargo.lock --vst3-sdk-revision "${VST3_SDK_REVISION}"
+          test "$(find "${output_dir}" -maxdepth 1 -type f | wc -l)" -eq 2
+          test -f "${output_dir}/wave-v${PUBLICATION_VERSION}-windows-x86_64-unsigned.vst3.zip"
+          test -f "${output_dir}/windows-artifact-manifest.json"
+
+      - name: Upload called nightly Windows artifact for assembly
+        if: inputs.source_sha != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wave-windows-${{ steps.metadata.outputs.build_id }}
+          path: dist/releases/${{ steps.metadata.outputs.build_id }}/*
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Upload standalone Windows artifact for inspection
+        if: inputs.source_sha == ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wave-${{ steps.metadata.outputs.publication_version }}-windows-x86_64-unsigned
+          path: dist/releases/${{ steps.metadata.outputs.build_id }}/*
+          if-no-files-found: error
+          retention-days: 3

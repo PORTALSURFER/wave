@@ -5,13 +5,22 @@ on:
     paths:
       - Cargo.lock
       - Cargo.toml
+      - build.rs
+      - src/**
       - scripts/release.sh
       - scripts/release_helper.py
-      - scripts/bump_version.py
+      - scripts/release_preflight_gate.py
+      - scripts/windows_release_helper.py
+      - tests/release_pipeline_integration.py
       - tests/release_helper_test.py
+      - tests/windows_release_helper_test.py
       - .github/workflows/release-preflight.yml
       - .github/workflows/release.yml
       - .github/workflows/nightly.yml
+      - .github/workflows/windows-release.yml
+      - docs/WINDOWS_RELEASE.md
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -19,22 +28,100 @@ permissions:
 
 env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  PYTHONDONTWRITEBYTECODE: "1"
+  VST3_SDK_REPOSITORY: https://github.com/steinbergmedia/vst3sdk.git
+  VST3_SDK_REVISION: 58f8da7936800732561402d7936584ca4505de07
 
 concurrency:
   group: wave-release-preflight-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  preflight:
-    runs-on: macos-latest
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      source_sha: ${{ steps.metadata.outputs.source_sha }}
+      package_version: ${{ steps.metadata.outputs.package_version }}
+      publication_version: ${{ steps.metadata.outputs.publication_version }}
+      build_id: ${{ steps.metadata.outputs.build_id }}
+      released_at: ${{ steps.metadata.outputs.released_at }}
+      attempt_suffix: ${{ steps.metadata.outputs.attempt_suffix }}
     steps:
-      - name: Checkout source
+      - name: Checkout exact source head
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare shared release metadata
+        id: metadata
+        env:
+          EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          WORKFLOW_SEQUENCE: ${{ github.run_number }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_sha="$(git rev-parse HEAD)"
+          [[ "${source_sha}" =~ ^[0-9a-f]{40}$ ]]
+          test "${source_sha}" = "${EXPECTED_SOURCE_SHA}"
+          package_version="$(python3 - <<'PY'
+          import pathlib
+          import tomllib
+
+          document = tomllib.loads(pathlib.Path("Cargo.toml").read_text(encoding="utf-8"))
+          print(document["package"]["version"])
+          PY
+          )"
+          publication_version="$(PYTHONPATH=scripts python3 - "${package_version}" "${WORKFLOW_SEQUENCE}" <<'PY'
+          import sys
+          from release_helper import derive_publication_version
+
+          print(derive_publication_version(sys.argv[1], "nightly", sys.argv[2]))
+          PY
+          )"
+          build_id="wave-v${publication_version}-${source_sha:0:12}"
+          released_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          attempt_suffix="run-${RUN_ID}-attempt-${RUN_ATTEMPT}"
+          [[ "${attempt_suffix}" =~ ^run-[0-9]+-attempt-[0-9]+$ ]]
+          {
+            echo "source_sha=${source_sha}"
+            echo "package_version=${package_version}"
+            echo "publication_version=${publication_version}"
+            echo "build_id=${build_id}"
+            echo "released_at=${released_at}"
+            echo "attempt_suffix=${attempt_suffix}"
+          } >> "${GITHUB_OUTPUT}"
+
+  preflight:
+    needs: prepare
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout exact source head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify shared source identity
+        env:
+          EXPECTED_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${EXPECTED_SOURCE_SHA}"
 
       - name: Run release helper tests
-        run: PYTHONDONTWRITEBYTECODE=1 python3 tests/release_helper_test.py
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python3 tests/release_helper_test.py
+          PYTHONDONTWRITEBYTECODE=1 python3 tests/windows_release_helper_test.py
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -42,20 +129,202 @@ jobs:
           components: rustfmt, clippy
 
       - name: Checkout pinned VST3 SDK
+        shell: bash
         run: |
           set -euo pipefail
-          git clone https://github.com/steinbergmedia/vst3sdk.git "$RUNNER_TEMP/vst3sdk"
-          git -C "$RUNNER_TEMP/vst3sdk" fetch --depth 1 origin 58f8da7936800732561402d7936584ca4505de07
-          git -C "$RUNNER_TEMP/vst3sdk" checkout --detach 58f8da7936800732561402d7936584ca4505de07
+          git clone "${VST3_SDK_REPOSITORY}" "$RUNNER_TEMP/vst3sdk"
+          git -C "$RUNNER_TEMP/vst3sdk" fetch --depth 1 origin "${VST3_SDK_REVISION}"
+          git -C "$RUNNER_TEMP/vst3sdk" checkout --detach "${VST3_SDK_REVISION}"
+          test "$(git -C "$RUNNER_TEMP/vst3sdk" rev-parse HEAD)" = "${VST3_SDK_REVISION}"
+          test -d "$RUNNER_TEMP/vst3sdk/pluginterfaces"
           echo "VST3_SDK_DIR=$RUNNER_TEMP/vst3sdk" >> "$GITHUB_ENV"
 
-      - name: Build and audit ad-hoc release bundles
-        run: bash scripts/release.sh --preflight --channel stable
+      - name: Build and audit ad-hoc macOS release
+        env:
+          BUILD_ID: ${{ needs.prepare.outputs.build_id }}
+          PACKAGE_VERSION: ${{ needs.prepare.outputs.package_version }}
+          RELEASED_AT: ${{ needs.prepare.outputs.released_at }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/release.sh \
+            --preflight \
+            --channel stable \
+            --version "${PACKAGE_VERSION}" \
+            --publication-version "${PACKAGE_VERSION}" \
+            --build-id "${BUILD_ID}" \
+            --released-at "${RELEASED_AT}" \
+            --source-sha "${SOURCE_SHA}"
 
-      - name: Upload preflight bundle for inspection
+      - name: Upload macOS preflight artifact for inspection
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: wave-release-preflight-${{ github.sha }}
+          name: wave-macos-preflight-${{ needs.prepare.outputs.build_id }}-${{ needs.prepare.outputs.attempt_suffix }}
           path: dist/releases/*
           if-no-files-found: error
           retention-days: 3
+
+  windows_integration:
+    needs: prepare
+    uses: ./.github/workflows/windows-release.yml
+    with:
+      source_sha: ${{ needs.prepare.outputs.source_sha }}
+      package_version: ${{ needs.prepare.outputs.package_version }}
+      publication_version: ${{ needs.prepare.outputs.publication_version }}
+      channel: nightly
+      build_id: ${{ needs.prepare.outputs.build_id }}
+      released_at: ${{ needs.prepare.outputs.released_at }}
+    permissions:
+      contents: read
+
+  artifact_contract:
+    needs: [prepare, preflight, windows_integration]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout exact source head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download macOS preflight artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: wave-macos-preflight-${{ needs.prepare.outputs.build_id }}-${{ needs.prepare.outputs.attempt_suffix }}
+          path: ${{ runner.temp }}/wave-macos-preflight
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: wave-windows-${{ needs.prepare.outputs.build_id }}
+          path: ${{ runner.temp }}/wave-windows
+
+      - name: Verify exact source identity
+        env:
+          EXPECTED_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${EXPECTED_SOURCE_SHA}"
+
+      - name: Execute producer-side artifact contract
+        env:
+          MACOS_ARTIFACT_ROOT: ${{ runner.temp }}/wave-macos-preflight
+          WINDOWS_ARTIFACT_ROOT: ${{ runner.temp }}/wave-windows
+          PACKAGE_VERSION: ${{ needs.prepare.outputs.package_version }}
+          PUBLICATION_VERSION: ${{ needs.prepare.outputs.publication_version }}
+          BUILD_ID: ${{ needs.prepare.outputs.build_id }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          RELEASED_AT: ${{ needs.prepare.outputs.released_at }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONDONTWRITEBYTECODE=1 python3 tests/release_pipeline_integration.py \
+            --mode artifact-contract \
+            --macos-artifact-root "${MACOS_ARTIFACT_ROOT}" \
+            --windows-artifact-root "${WINDOWS_ARTIFACT_ROOT}" \
+            --package-version "${PACKAGE_VERSION}" \
+            --publication-version "${PUBLICATION_VERSION}" \
+            --build-id "${BUILD_ID}" \
+            --source-sha "${SOURCE_SHA}" \
+            --released-at "${RELEASED_AT}" \
+            --scratch-parent "${RUNNER_TEMP}"
+
+  publisher_integration:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [prepare, preflight, windows_integration, artifact_contract]
+    runs-on: ubuntu-latest
+    environment: publisher-integration
+    permissions:
+      contents: read
+    steps:
+      - name: Create scoped PortalSurfer publisher token
+        id: publisher_token
+        uses: actions/create-github-app-token@7e473efe3cb98aa54f8d4bac15400b15fad77d94 # v2.2.0
+        with:
+          app-id: ${{ vars.PORTALSURFER_PUBLISHER_APP_ID }}
+          private-key: ${{ secrets.PORTALSURFER_PUBLISHER_PRIVATE_KEY }}
+          owner: PORTALSURFER
+          repositories: portalsurfer.org
+          permission-contents: read
+
+      - name: Checkout exact trusted source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download macOS preflight artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: wave-macos-preflight-${{ needs.prepare.outputs.build_id }}-${{ needs.prepare.outputs.attempt_suffix }}
+          path: ${{ runner.temp }}/wave-macos-preflight
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: wave-windows-${{ needs.prepare.outputs.build_id }}
+          path: ${{ runner.temp }}/wave-windows
+
+      - name: Verify exact trusted source identity
+        env:
+          EXPECTED_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${EXPECTED_SOURCE_SHA}"
+
+      - name: Checkout exact PortalSurfer publisher
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: PORTALSURFER/portalsurfer.org
+          ref: 12d2c089d3d135c6839013a097dbf3baebf5fdb3
+          token: ${{ steps.publisher_token.outputs.token }}
+          path: portalsurfer-publisher
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify pinned PortalSurfer publisher checkout
+        id: publisher
+        env:
+          PUBLISHER_COMMIT: 12d2c089d3d135c6839013a097dbf3baebf5fdb3
+        shell: bash
+        run: |
+          set -euo pipefail
+          publisher_dir="${GITHUB_WORKSPACE}/portalsurfer-publisher"
+          test "$(git -C "${publisher_dir}" rev-parse HEAD)" = "${PUBLISHER_COMMIT}"
+          ! git -C "${publisher_dir}" symbolic-ref --quiet HEAD
+          test -z "$(git -C "${publisher_dir}" status --porcelain --untracked-files=all)"
+          publisher_script="${publisher_dir}/scripts/publish-plugin-release.mjs"
+          test -f "${publisher_script}" && test ! -L "${publisher_script}"
+          echo "path=${publisher_script}" >> "${GITHUB_OUTPUT}"
+
+      - name: Execute publisher integration against loopback mocks
+        env:
+          MACOS_ARTIFACT_ROOT: ${{ runner.temp }}/wave-macos-preflight
+          WINDOWS_ARTIFACT_ROOT: ${{ runner.temp }}/wave-windows
+          PUBLISHER_SCRIPT: ${{ steps.publisher.outputs.path }}
+          PACKAGE_VERSION: ${{ needs.prepare.outputs.package_version }}
+          PUBLICATION_VERSION: ${{ needs.prepare.outputs.publication_version }}
+          BUILD_ID: ${{ needs.prepare.outputs.build_id }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          RELEASED_AT: ${{ needs.prepare.outputs.released_at }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONDONTWRITEBYTECODE=1 python3 tests/release_pipeline_integration.py \
+            --mode publisher-integration \
+            --macos-artifact-root "${MACOS_ARTIFACT_ROOT}" \
+            --windows-artifact-root "${WINDOWS_ARTIFACT_ROOT}" \
+            --publisher-script "${PUBLISHER_SCRIPT}" \
+            --package-version "${PACKAGE_VERSION}" \
+            --publication-version "${PUBLICATION_VERSION}" \
+            --build-id "${BUILD_ID}" \
+            --source-sha "${SOURCE_SHA}" \
+            --released-at "${RELEASED_AT}" \
+            --scratch-parent "${RUNNER_TEMP}"

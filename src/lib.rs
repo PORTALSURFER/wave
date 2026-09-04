@@ -1,4 +1,4 @@
-//! WAVE is a macOS-oriented beat-inspection effect with a pass-through audio path.
+//! WAVE is a beat-inspection effect with a pass-through audio path.
 //!
 //! The audio callback captures only complete selected beat windows when the host
 //! provides a usable tempo, musical position, and playing state. The editor
@@ -16,7 +16,10 @@ use std::sync::Arc;
 
 use toybox::clack_common::plugin::features as plugin_features;
 use toybox::clack_extensions::audio_ports::*;
-#[cfg(all(target_os = "macos", feature = "radiant-gui"))]
+#[cfg(all(
+    any(target_os = "macos", target_os = "windows"),
+    feature = "radiant-gui"
+))]
 use toybox::clack_extensions::gui::{PluginGui, PluginGuiImpl};
 use toybox::clack_extensions::params::{
     ParamDisplayWriter, ParamInfoWriter, PluginAudioProcessorParams, PluginMainThreadParams,
@@ -32,9 +35,12 @@ use toybox::clap::process::split_channel;
 use toybox::clap::state::{read_versioned_payload, write_versioned_payload};
 
 mod capture;
-#[cfg(all(target_os = "macos", feature = "radiant-gui"))]
+#[cfg(all(
+    any(target_os = "macos", target_os = "windows"),
+    feature = "radiant-gui"
+))]
 mod gui;
-#[cfg(all(target_os = "macos", feature = "vst3"))]
+#[cfg(all(any(target_os = "macos", target_os = "windows"), feature = "vst3"))]
 mod vst3;
 
 use capture::{CaptureEngine, TransportInfo, WaveformPublication};
@@ -55,7 +61,10 @@ impl Plugin for WavePlugin {
             .register::<PluginAudioPorts>()
             .register::<PluginParams>()
             .register::<PluginState>();
-        #[cfg(all(target_os = "macos", feature = "radiant-gui"))]
+        #[cfg(all(
+            any(target_os = "macos", target_os = "windows"),
+            feature = "radiant-gui"
+        ))]
         builder.register::<PluginGui>();
     }
 }
@@ -77,7 +86,10 @@ impl DefaultPluginFactory for WavePlugin {
         host: HostMainThreadHandle<'a>,
         shared: &'a Self::Shared<'a>,
     ) -> Result<Self::MainThread<'a>, PluginError> {
-        #[cfg(all(target_os = "macos", feature = "radiant-gui"))]
+        #[cfg(all(
+            any(target_os = "macos", target_os = "windows"),
+            feature = "radiant-gui"
+        ))]
         {
             let _ = host;
             Ok(WaveMainThread {
@@ -85,7 +97,10 @@ impl DefaultPluginFactory for WavePlugin {
                 gui: gui::new_gui(Arc::clone(&shared.publication)),
             })
         }
-        #[cfg(not(all(target_os = "macos", feature = "radiant-gui")))]
+        #[cfg(not(all(
+            any(target_os = "macos", target_os = "windows"),
+            feature = "radiant-gui"
+        )))]
         {
             let _ = host;
             let _ = shared;
@@ -114,7 +129,10 @@ impl PluginShared<'_> for WaveShared {}
 /// Main-thread state for the CLAP host contract.
 pub struct WaveMainThread<'a> {
     _marker: PhantomData<&'a WaveShared>,
-    #[cfg(all(target_os = "macos", feature = "radiant-gui"))]
+    #[cfg(all(
+        any(target_os = "macos", target_os = "windows"),
+        feature = "radiant-gui"
+    ))]
     gui: toybox::radiant_gui::RadiantHostedGui,
 }
 
@@ -184,7 +202,10 @@ impl PluginStateImpl for WaveMainThread<'_> {
     }
 }
 
-#[cfg(all(target_os = "macos", feature = "radiant-gui"))]
+#[cfg(all(
+    any(target_os = "macos", target_os = "windows"),
+    feature = "radiant-gui"
+))]
 impl PluginGuiImpl for WaveMainThread<'_> {
     toybox::radiant_clap_gui_callbacks!(
         gui = gui,

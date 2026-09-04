@@ -1,4 +1,4 @@
-//! macOS VST3 adapter for WAVE.
+//! Cross-platform VST3 adapter for WAVE.
 
 use std::ffi::c_void;
 
@@ -7,7 +7,7 @@ use toybox::vst3::prelude::*;
 
 mod controller;
 mod factory;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod gui_adapter;
 mod processor;
 mod shared_state;
