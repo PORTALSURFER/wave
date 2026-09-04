@@ -57,6 +57,7 @@ WINDOWS_RUNNER_OS = "win22"
 RUST_TOOLCHAIN = "1.97.1"
 RUST_TARGET = "x86_64-pc-windows-msvc"
 PYTHON_IMPLEMENTATION = "CPython"
+WINDOWS_RELEASE_CHANNEL = "nightly"
 
 
 def _positive_int(value: Any) -> bool:
@@ -112,6 +113,8 @@ def _validate_regular_file(path: Path, label: str) -> None:
 
 
 def _validate_identity(*, package_version: str, publication_version: str, channel: str, build_id: str, released_at: str, source_sha: str) -> None:
+    if channel != WINDOWS_RELEASE_CHANNEL:
+        raise ValueError("Windows artifacts support only the nightly channel")
     if not isinstance(package_version, str) or SEMVER.fullmatch(package_version) is None or "-" in package_version:
         raise ValueError("package version must be a numeric semver")
     try:
@@ -440,7 +443,7 @@ def _build_parser() -> argparse.ArgumentParser:
     package.add_argument("--output-dir", required=True)
     package.add_argument("--package-version", required=True)
     package.add_argument("--publication-version", required=True)
-    package.add_argument("--channel", choices=("stable", "rc", "nightly"), required=True)
+    package.add_argument("--channel", choices=(WINDOWS_RELEASE_CHANNEL,), required=True)
     package.add_argument("--build-id", required=True)
     package.add_argument("--released-at", required=True)
     package.add_argument("--source-sha", required=True)

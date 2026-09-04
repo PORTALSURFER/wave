@@ -114,6 +114,31 @@ source = "git+https://github.com/PORTALSURFER/radiant.git?rev={"b" * 40}#{"b" * 
             self.assertEqual(dependencies["radiant"]["revision"], "b" * 40)
             self.assertEqual(dependencies["vst3sdk"]["revision"], "c" * 40)
 
+    def test_stable_and_rc_channels_are_rejected_before_packaging(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "dist" / helper.bundle_name(PACKAGE_VERSION) / "Contents" / "x86_64-win" / helper.bundle_name(PACKAGE_VERSION)
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(pe_bytes())
+            lockfile = self._lockfile(root)
+            for channel, publication_version in (("stable", PACKAGE_VERSION), ("rc", f"{PACKAGE_VERSION}-rc.1")):
+                with self.subTest(channel=channel):
+                    output = root / f"release-{channel}"
+                    with self.assertRaisesRegex(ValueError, "only the nightly channel"):
+                        helper.package_windows_vst3(
+                            binary=binary,
+                            output_dir=output,
+                            package_version=PACKAGE_VERSION,
+                            publication_version=publication_version,
+                            channel=channel,
+                            build_id=f"wave-v{publication_version}-{SOURCE_SHA[:12]}",
+                            released_at=RELEASED_AT,
+                            source_sha=SOURCE_SHA,
+                            dependencies=self._dependencies(lockfile),
+                            build_environment=BUILD_ENVIRONMENT,
+                        )
+                    self.assertFalse(output.exists())
+
     def test_pe32_plus_and_unsigned_authenticode_contract(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

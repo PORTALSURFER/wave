@@ -75,6 +75,13 @@ class ReleaseHelperTests(unittest.TestCase):
         self.assertIn('cargo build --locked --release --target "${RUST_TARGET}" --features vst3', windows_workflow)
         self.assertNotIn("id-token:", windows_workflow)
         self.assertNotIn("secrets.", windows_workflow)
+        dispatch_block = windows_workflow.split("  workflow_dispatch:\n", 1)[1].split("  workflow_call:\n", 1)[0]
+        self.assertIn("default: nightly", dispatch_block)
+        self.assertIn("options: [nightly]", dispatch_block)
+        self.assertNotIn("stable", dispatch_block)
+        self.assertNotIn("rc", dispatch_block)
+        metadata_block = windows_workflow.split("- name: Compute publication version and build identity\n", 1)[1].split("- name: Install Rust\n", 1)[0]
+        self.assertIn('test "${RELEASE_CHANNEL_INPUT}" = nightly', metadata_block)
         self.assertIn('WAVE_TEAM_ID = "DKTKQ8U5T8"', helper)
 
         release_files = [

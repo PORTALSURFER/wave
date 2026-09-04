@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       channel:
-        description: Release channel for standalone Windows inspection
+        description: Nightly release channel for standalone Windows inspection
         required: true
-        default: stable
+        default: nightly
         type: choice
-        options: [stable, rc, nightly]
+        options: [nightly]
   workflow_call:
     inputs:
       source_sha:
@@ -94,8 +94,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test "${RELEASE_CHANNEL_INPUT}" = nightly
           if [[ "${CALLED_MODE}" == true ]]; then
-            test "${RELEASE_CHANNEL_INPUT}" = nightly
             package_version="${PACKAGE_VERSION_INPUT:?workflow_call package version is missing}"
             publication_version="${PUBLICATION_VERSION_INPUT:?workflow_call publication version is missing}"
             build_id="${BUILD_ID_INPUT:?workflow_call build id is missing}"
